@@ -21,3 +21,17 @@ sp
 raster
 DescTools
 EMAtools
+ggExtra
+tsne
+cowplot
+scales
+stringr
+parallelsugar
+clValid
+entropy
+MASS
+ggnetwork
+network
+statnet.common
+sna
+ggbeeswarm

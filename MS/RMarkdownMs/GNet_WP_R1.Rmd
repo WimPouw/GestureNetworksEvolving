@@ -1,0 +1,1313 @@
+---
+title             : "A systematic investigation of gesture kinematics in evolving manual languages in the lab"
+shorttitle        : "Systematic investigation of evolving kinematics"
+
+author: 
+  - name          : "Wim Pouw"
+    affiliation   : "1"
+    corresponding : yes    # Define only one corresponding author
+    address       : "Montessorilaan 3, 6525 HR Nijmegen"
+    email         : "w.pouw@psych.ru.nl"
+  - name          : "Mark Dingemanse"
+    affiliation   : "1,3"
+  - name          : "Yasamin Motamedi"
+    affiliation   : "4"
+  - name          : "Asli Ozyurek"
+    affiliation   : "1,2,3"
+
+affiliation:
+  - id            : "1"
+    institution   : "Donders Institute for Brain, Cognition and Behaviour, Radboud University Nijmegen"
+  - id            : "2"
+    institution   : "Institute for Psycholinguistics, Max Planck Nijmegen"
+  - id            : "3"
+    institution   : "Center for Language Studies, Radboud University Nijmegen "
+  - id            : "4"
+    institution   : "Centre for Language Evolution, University of Edinburgh"
+
+authornote: |
+  This work is supported by a Donders Fellowship awarded to Wim Pouw and Asli Ozyurek and is supported by the Language in Interaction consortium project 'Communicative Alignment in Brain & Behavior' (CABB).
+
+abstract: |
+  Silent gestures consist of complex multi-articulatory movements, but are now primarily studied through categorical coding of the referential gesture content. The relation of linguistic content with continuous kinematics is therefore poorly understood. Here we reanalyzed the video data from a gestural evolution experiment (Motamedi et al. 2019), which showed increases in the systematicity of gesture content over time. We applied computer vision techniques to quantify and analyze the kinematics of the original data, demonstrating that gestures become more efficient and less complex in their kinematics over generations of learners. We further detect systematicity of gesture form on the level of their interrelations, which directly scales with the systematicity obtained on semantic coding of the gestures. Thus from continuous kinematics alone we can tap into linguistic aspects that were previously only approachable through categorical coding of meaning. Finally, going beyond issues of systematicity we show how unique gesture kinematic dialects emerged over generations, as isolated chains of participants gradually diverged over iterations from other chains. We thereby show how gestures can come to embody the linguistic system at the level of interrelationships between communicative tokens, which should calibrate our theories about form and linguistic content.
+  
+keywords          : "language evolution, silent gesture, kinematics, systematicity"
+wordcount         : "X"
+
+bibliography      : ["r-references.bib"]
+
+fig_caption       : no
+floatsintext      : yes
+figurelist        : no
+tablelist         : no
+footnotelist      : no
+linenumbers       : yes
+mask              : no
+draft             : no
+
+documentclass     : "apa6"
+classoption       : "man, noextraspace"
+output            : papaja::apa6_word
+---
+
+```{r setup, include = FALSE}
+library("papaja")     #papaja::apa6_pdf papaja::apa6_word
+library(ggplot2)      #plotting
+library(plotly)       #plotting
+library(gridExtra)    #plotting (constructing multipanel plots)
+library(ggExtra)      #plotting (adding distributions)
+library(RColorBrewer) #plotting (color schemes)
+library(dtw)          #dynamic time warping functions
+library(effsize)      #effect sizes calculations
+library(igraph)       #network graphing and analysis (network entropy)
+library(cluster)      #cluster analysis (agglomerative clustering coefficient)
+library(nlme)         #mixed linear regression
+library(signal)       #for butterworth filter
+library(pracma)       #for peak finding
+library(r2glmm)       #mixed regression R^2
+library(DescTools)    #Entropy calculation of the original motamedi data
+library(entropy)      #Entropy calculations
+library(EMAtools)     #cohen's d for mixed regression predictors
+library(tsne)         #visualization for networks
+library(cowplot)      #plotting aesthetics
+library(scales)       #functions rescaling variables
+library(stringr)          #string manipulation
+library(parallelsugar)    #for parallel computing
+library(clValid)      #clustering
+library(MASS)         #clustering
+```
+
+```{r analysis-preferences}
+# Seed for random number generation
+# This is for example important for dimensionality reduction t-sne used for
+# plotting
+set.seed(42)
+knitr::opts_chunk$set(cache.extra = knitr::rand_seed)
+```
+
+```{r main_data_load, warning = FALSE, include = FALSE}
+#prepare the data
+  #time series data (ts): This file contains all the gesture time series and relevant info about the gesture (chain etc)
+  #matrices data: This is the folder where all the gesture network matrices are stored and are created in the code chunk below
+  #meta: This contains the original data from Motamedi where e.g., gesture codes, unique information units are given for each gesture
+
+#SET FOLDERS: !!!PLEASE CHANGE TO OWN FOLDER STRUCTURE FOR CODE TO RUN APPROPRIATELY!!!
+basefolder <- dirname(getwd())
+ts <- read.csv(paste0(basefolder, "/Experiment1/Data/ts_exp1.csv"))
+matrices_data <- paste0(basefolder, "/Experiment1/Data/DistanceMatrices/")
+plotfolder <- paste0(basefolder, "/Experiment1/Plots")
+
+  #load in original METAdata Motamedi into time series
+  meta <- read.csv(paste0(basefolder, "/experiment1/Data/ex1.csv"))
+    #change the naming in the meta file and time so that it overlaps with the naming in the time series file
+  meta$target <- gsub(" ", "_", meta$target)
+  ts$object <- as.character(ts$object)
+  meta$target[meta$target == "to_take_a_photo"] <- "take_photo"
+  
+  #loop through object names in the time series file, match with meta naming, and change to time series naming 
+  for(i in unique(ts$object))
+  {    
+    meta$target[grep(i, meta$target)] <- i
+  }
+  
+  #recompute entropy Motamedi
+  meta$uniq_codestring <- NA 
+  #first only keep unique human-coded information elements in each gesture (this is where entropy is calculated on)
+  for(r in 1:nrow(meta))
+    {
+    strr <- c(strsplit(as.character(meta$code_string[r]), split = ",")[[1]]) # get a vector with all elements
+    if(length(strr) > 0) #if there is more than one element
+    {
+    meta$uniq_codestring[r] <- paste0(strr[!duplicated(strr)], collapse = ',') #remove duplicates and combine them in a single string again, then save into unique code string 
+    }
+  }
+  
+  #compute entropy on the concatenated list for gesture information units per participant
+  meta$entropy <- NA #initalize variable which will contain ppn-level entropy, it will be saved in the metadataset
+    for(ppn in unique(meta$participant))
+    {
+    gstring     <- paste0(as.character(meta$uniq_codestring[meta$participant == ppn]),collapse = ',')
+    gstring     <- as.data.frame(strsplit(gstring, split = ","))
+    gstring[,1] <- as.numeric(factor(gstring[,1]))
+    meta$entropy[meta$participant==ppn]     <- Entropy(gstring[,1]) #add entropy measure to Motamedi meta file
+    }
+
+#load in time series object for each gesture the video_length, number of reps, guess time, code length, code_string(entropy calc)
+  
+  unique_videos <- unique( paste0(ts$ppn, ts$object)) #make an object where we can identify each unique gesture in the dataset
+  #make new variables in in the time series files
+  ts$ann_guesstime <- ts$ann_gcode <- ts$ann_reps <-  ts$ann_inf_units <-ts$segments <- ts$ann_entropy  <- NA
+  #loop through all videos and load in relevant data from the meta files so that Time series data have this info too
+  for(v in unique_videos)
+  {
+    condts <- (paste0(ts$ppn, ts$object)==v) #set condition for selection time series
+    condmet <- (paste0(meta$participant, meta$target)==v) #set condition for selection time series
+    
+    #load in the meta data into time series object so that this information can be easily retrieved
+    #when using these objects for analysis
+    if(TRUE %in% condmet)
+    {
+    ts$ann_guesstime[condts]  <- unique(meta$guess_time[condmet])
+    ts$ann_verb[condts]       <- as.character(unique(meta$verb[condmet]))
+    ts$ann_gcode[condts]      <- as.character(unique(meta$code_string[condmet]))
+    ts$ann_reps[condts]       <- unique(meta$num_reps[condmet])
+    ts$ann_inf_units[condts]  <- unique(meta$code_len[condmet])
+    ts$segments[condts]       <- unique(meta$num_reps[condmet])+unique(meta$code_len[condmet])
+    ts$ann_entropy[condts]    <- unique(meta$entropy[condmet])
+    }
+  }
+```
+
+```{r repeated_functions, echo = FALSE, warning = FALSE}
+#FUNCTION extractR.traces: we often need to extract the relevant movement traces from the dataset for input for the Multivariate DTW
+  #the relevant z-scaled and centered x,y, traces are left and right hand movement, head movement
+  #this function extracts these traces to be used as input for DTW
+extractR.traces <- function(dat)
+{
+  dat <- data.frame(dat)
+  ts1 <- cbind( as.vector(scale(dat$x_index_left, center = TRUE)),
+                as.vector(scale(dat$y_index_left, center = TRUE)),
+                as.vector(scale(dat$x_index_right, center = TRUE)),
+                as.vector(scale(dat$y_index_right, center = TRUE)),
+                as.vector(scale(dat$x_wrist_left, center = TRUE)),
+                as.vector(scale(dat$y_wrist_left, center = TRUE)),
+                as.vector(scale(dat$x_wrist_right, center = TRUE)),
+                as.vector(scale(dat$y_wrist_right, center = TRUE)),
+                as.vector(scale(dat$x_nose, center = TRUE)),
+                as.vector(scale(dat$y_nose, center = TRUE)))
+} 
+
+
+#FUNCTION DTW.compare:  This function performs the multidimensional dynamic time warping (D) score
+  #It takes two multivariable time series (see extractR.traces) as argument, and it takes as argument whether only hands should be compared 
+DTW.compare <- function(TS1, TS2, manualonly)
+{
+    #make sure that if there is nothing detected than set to 0
+    TS1 <- ifelse(is.nan(TS1), 0, TS1)
+    TS2 <- ifelse(is.nan(TS2), 0, TS2)
+    
+    #perform the dynamic time warping, extract the distance, and then sum the score
+    distancedtw <-  dtw(  TS1[,1:2],   TS2[,1:2])$normalizedDistance +
+                  dtw(  TS1[,3:4],   TS2[,3:4])$normalizedDistance +
+                  dtw(  TS1[,5:6],   TS2[,5:6])$normalizedDistance + 
+                  dtw(  TS1[,7:8],   TS2[,7:8])$normalizedDistance +
+                  dtw(  TS1[,9:10],   TS2[,9:10])$normalizedDistance
+    
+    #do the same procedure but only for the index and wrist traces (will be use to compare performance of different body points)
+    if(manualonly == "manual_only")
+    {
+    distancedtw <-  dtw(  TS1[,1:2],   TS2[,1:2])$normalizedDistance +
+                    dtw(  TS1[,3:4],   TS2[,3:4])$normalizedDistance +
+                    dtw(  TS1[,5:6],   TS2[,5:6])$normalizedDistance + 
+                  dtw(  TS1[,7:8],   TS2[,7:8])$normalizedDistance
+    }
+    return(distancedtw)
+}
+
+#dimensionless smoothness measure
+smooth.get <- function(velocity) #Hogan & Sternad formula
+{
+  if(!all(velocity ==0))
+  {
+  velocity <- as.vector(scale(velocity))
+  acceleration <- butter.it(diff(velocity))
+  jerk         <- butter.it(diff(acceleration))
+  integrated_squared_jerk <- sum(jerk^2)
+  max_squaredvelocity <- max(velocity^2)
+  D3 <- (length(velocity))^3
+  jerk_dimensionless <-  integrated_squared_jerk*(D3/max_squaredvelocity)
+  smoothness <- jerk_dimensionless
+  }
+  if(all(velocity ==0)) #if all zero, this
+  {
+  smoothness <- NA
+  }
+  return(smoothness)
+}
+
+#butterworth filter
+butter.it <- function(x)
+{bf <- butter(1, 1/33, type="low")
+x <- as.numeric(signal::filter(bf, x))}
+
+#kinematic feature extraction:
+  #THIS FUNCTION EXTRACTS FOR ALL keypoints the: submovements, intermittency (smoothness), rhythm, 
+  #temporal variability (rhythmicity), gesture space
+kin.get <- function(MT)
+  {
+    MT <- data.frame(MT)
+  #perform submovement analysis(using findpeaks function), and also compute rhythm and temporal variability from it
+    #extract peaks from velocity time series
+    peaksnose       <- findpeaks(as.vector(scale(MT$velocity_nose)), minpeakdistance = 8, minpeakheight = -1, threshold=0.1)
+      rhythmnose    <- abs(diff(MT$time_ms[peaksnose[,2]]))/1000 #compute interval in time between peaks
+    #extract peaks from velocity time series
+    peaksleft_w     <- findpeaks(as.vector(scale(MT$velocity_left_w)), minpeakdistance = 8, minpeakheight = -1, threshold=0.1)
+      rhythmleft_w    <- abs(diff(MT$time_ms[peaksleft_w[,2]]))/1000 #compute interval in time between peaks
+    #extract peaks from velocity time series
+     peaksright_w    <- findpeaks(as.vector(scale(MT$velocity_right_w)), minpeakdistance = 8, minpeakheight = -1,threshold=0.1)
+      rhythmright_w    <- abs(diff(MT$time_ms[peaksright_w[,2]]))/1000 #compute interval in time between peaks
+    #extract peaks from velocity time series
+    peaksleft_i     <- findpeaks(as.vector(scale(MT$velocity_left)), minpeakdistance = 8, minpeakheight = -1,threshold=0.1)
+      rhythmleft_i    <- abs(diff(MT$time_ms[peaksleft_i[,2]]))/1000 #compute interval in time between peaks
+    #extract peaks from velocity time series
+    peaksright_i    <- findpeaks(as.vector(scale(MT$velocity_right)), minpeakdistance = 8, minpeakheight = -1,threshold=0.1)
+      rhythmright_i    <- abs(diff(MT$time_ms[peaksright_i[,2]]))/1000 #compute interval in time between peaks
+
+    #extract temporal variability from rhythm intervals
+    rhythmicity <- NA
+    rhythmicity <- c(sd(rhythmnose, na.rm=TRUE), sd(rhythmleft_w, na.rm = TRUE), sd(rhythmright_w, na.rm= TRUE), sd(rhythmleft_i, na.rm =TRUE), sd(rhythmright_i, na.rm = TRUE))
+    rhythmicity <- mean(rhythmicity, na.rm= TRUE)
+    if(is.nan(rhythmicity)){rhythmicity <- NA} #if there are no intervals to extract rhythm for set at NA (rather than nan)
+    
+    #compute average rhythm tempo
+    rhythm <- NA
+    rhythm <- c(rhythmnose, rhythmleft_w, rhythmright_w, rhythmleft_i,rhythmright_i)
+    rhythm <- mean(rhythm, na.rm= TRUE)
+    if(is.nan(rhythm)){rhythm <- NA} #if there are no intervals to extract rhythm for set at NA
+    
+    #compute total submovements from all keypoints
+    submovements <- sum(c(nrow(peaksnose), nrow(peaksleft_w), nrow(peaksright_w), nrow(peaksleft_i),                  nrow(peaksright_i), na.rm=TRUE))
+    
+    #compute average intermittency (referred to here as smoothness) of all keypoints (use function smooth.get given above)
+    smoothness <- mean(c(smooth.get(MT$velocity_nose), smooth.get(MT$velocity_left_w), smooth.get(MT$velocity_left_w),  smooth.get(MT$velocity_left), smooth.get(MT$velocity_right)))
+
+    #compute average gesture space used by the gesture
+    gspace <- mean(c( (max(MT$x_nose)-min(MT$x_nose))*(max(MT$y_nose)-min(MT$y_nose)),
+                (max(MT$x_index_left)-min(MT$x_index_left))*(max(MT$y_index_left)-min(MT$y_index_left)),
+                (max(MT$x_index_right)-min(MT$x_index_right))*(max(MT$y_index_right)-min(MT$y_index_right)),
+                (max(MT$x_wrist_left)-min(MT$x_wrist_left))*(max(MT$y_wrist_left)-min(MT$y_wrist_left)),
+                (max(MT$x_wrist_right)-min(MT$x_wrist_right))*(max(MT$y_wrist_right)-min(MT$y_wrist_right))))
+    gspace <- gspace/1000
+    
+    #bind everything into a single output object containing all the relevent kinematic features
+    features <- cbind(submovements, smoothness, gspace, rhythmicity,rhythm)
+    return(features)
+}
+
+#network entropy mean
+ent.N <- function(matri)
+{ 
+  entropym<- graph.adjacency(as.matrix(matri), mode="undirected", weighted=TRUE, diag = FALSE)
+  entropy <- mean(igraph::diversity(entropym))
+  return(entropy)
+  }
+```
+
+\begingroup
+\setlength{\parindent}{0.5in}
+\setlength{\leftskip}{0.5in}
+
+  All known natural languages combine discrete categorical elements with continuous and dynamic properties [@bolingerAspectsLanguage1968]. For a long time, the study of human communicative behavior has focused on aspects that best yield to analysis in terms of discrete categories such as lexical items, phonological building blocks, semantic categories, and their combinatorial properties. At the same time, language use is widely acknowledged to also feature more gradient and continuous streams of behavior that do not always easily yield to an analysis in terms of discrete symbol systems [@enfieldAnatomyMeaningSpeech2009; @kendonGestureVisibleAction2004]. Here we investigate whether kinematic measures directly derived from continuous manual movements can capture the meaning space they are designed to communicate. Using communicative silent gestures as a test case, we show how continuous movements can be studied as evolving dynamic systems.  
+  Manual gestures are seldomly *semiotically* studied based on the measurable part of a signal’s form, namely manual and whole-body postures in movement (i.e., the kinematic level). Instead gestures are mostly studied as already categorizable expressions by researchers inferring meaning from their form [@mcneillGestureThought2005]. As such the kinematics are in one sense reduced (from continuous to discrete tokens) and in another sense enriched (from movement to message) with meanings that are projected onto them by human arbitrators. Here we study more abstract aspects of gestural systems through kinematic analysis. Our aim is to show that we do not need to leave the domain of form to observe the emergence of systematic properties. We suggest that a signal’s form, when studied in relation to other forms, can provide information about its linguistic properties that can complement or supplement cues that take into account conventional denotation and contextual information. Such systematicity in form —where low-level properties can serve as cues to higher-level regularities— is known from work on lexical classes in signed and spoken languages [@dingemanseArbitrarinessIconicitySystematicity2015; @paddenPatternedIconicitySign2013]. To observe it in existing linguistic systems, we can rely on conventional meanings and existing syntactic and semantic categories. Here we aim to capture its emergence in rich kinematic signals as they evolve over time. In doing so, we want to contribute to an understanding of how communicative signs come to function as interrelated parts of complex dynamic systems: relatively stable ways of signaling that form higher order structural wholes [@raczaszek-leonardiReconcilingSymbolicDynamic2008; @daleHowHumansMake2018].    
+  The sense-making process of individual forms becoming parts of structural wholes is essentially simulated in iterated learning experiments [@kirbyIteratedLearningEvolution2014; @motamediEvolvingArtificialSign2019]. In such experiments, agents are tasked to learn a novel set of signals. These signals are iteratively transmitted to later generations and/or used in communication by later generations (iterated learning + communication), where, over many cycles of learning and use, they are affected by various transmission biases [e.g., @christiansenNoworNeverBottleneckFundamental2016; @enfieldNaturalCausesLanguage2014]. Processes of iterated learning and communication can simulate how structural properties such as systematicity, learnability, and compositionality evolve from simpler communication systems. In such simulations, communicative tokens undergo cultural evolution constrained by population dynamic properties such as historicity (the system is constrained by past contingencies) and adaptivity (the system adapts in service of its informative goals). Such population dynamics must have played out over long temporal and vast population scales, but through these iterated learning paradigms such processes are to some degree brought under experimental control. These evolving or emerging communicative systems can be constituted by a variety of different signal media, from simple discrete symbol sequences to more challenging continuous acoustic signals [@cornishSequenceMemoryConstraints2017; @ravignaniMusicalEvolutionLab2016; @verhoefIconicityEmergenceCombinatorial2016].  
+
+## Current case study  
+
+  Most iterated learning studies have simulated the cultural evolution of sign systems using easily discretized word-like written forms [@verhoefEmergenceCombinatorialStructure2014; @verhoefIconicityEmergenceCombinatorial2016]. While this has made it easy to operationalize measures like compressibility, systematicity, and expressivity, it has done so at the expense of ecological validity. After all, the embodied semiotic resources that all known natural languages rely on are not carved into a predefined discrete symbol system like the Latin alphabet; instead, users and analysts of language alike must derive everything they know about linguistic systems from biological signals that are fundamentally dynamic and continuous [@patteeLAWSLANGUAGELIFE2012].  
+   Iterated learning work has only recently moved into the area of continuous signals. The first adaptations focused on the emergence of phonological organization in continuous acoustic signals (Verhoef et al. 2014, 2016). Such signals do not afford a lot of semantic expressivity, so recent work has extended to the more daunting area of continuous multi-articulator signals in the form of manual depictions, or silent gestures [@motamediEvolvingArtificialSign2019]. This experimental work studied the transmission of silent gestures created to communicate 24 concepts along two broad semantic dimensions: theme (e.g., food, religion) and function (e.g., person, location) (see Figure 1).
+   
+  Figure 1. Concepts to be conveyed in gesture in Motamedi et al. 2019  
+```{r plotconcepts, echo = FALSE, warning = FALSE}
+library(raster)
+#load in the finally edited time series example
+mypng <- stack(paste0(plotfolder, "/Concepts/concepts.png"))
+plotRGB(mypng,maxpixels=1e500000)
+```
+*Note Figure 1*. A) The concepts and categories that were used in the original experiment are shown. B) Example of silent gestures depicting the concept "prison". In the first generation, a drawn out multicomponent silent gesture is shown (multiple arm movements and head movement), while in the final generation 5 a much more simpler gesture is produced. For the current study we use motion tracking of the silent gestures, here indicated with a pose-skeleton overlaying the original video data.
+
+  The two semantic dimensions provide possible axes for compression and systematization of the communicative tokens. At one extreme, one might invent 24 unique gestural utterances that are not clearly related to each other, such as in the following videos for “to sing” (https://osf.io/d8srx/) and “singer” (https://osf.io/974ke/). A more efficient encoding would be to start differentiating by functional category such that “microphone” is preceded by a general object marking gesture (“https://osf.io/r3gcp/”) and “singer” is preceded by a general person marking gesture (“https://osf.io/ex4tv/”), both followed by the same thematic marking gesture conveying “music”. Such general functional markers aid the disambiguation of related meanings, and they allow for a systematic reemployment of the same signal, thereby reducing the signaling space. In theory, once you invent 4 functional marker gestures, and 6 thematic marker gestures, you can systematically recombine these to convey all 24 meanings. The communicative system then has compressed its information density from 24 information units to 10 information units.   
+  Motamedi and colleagues (2019) indeed observed such signs of compression of the meaning space as the system developed. In early iterations of learning, fairly fine-grained iconic enactments were the most common way of gesturally depicting the referents. But over generations, functional markers were found to become more prevalent and meaning components were increasingly reused across gestures. On our supplemental page we have provided video examples ("https://osf.io/5zqnb/") of all the gestures produced in generation 1 versus generation 5 for a particular chain (chain 1), where we highlight in red how in generation 5 there are clear recurring functional markers for the person category (using a pointing-to-self gesture) which is absent in generation 1. 
+  With meticulous hand coding of the different referential components of each silent gesture, Motamedi and colleagues (2019) quantitatively tested whether there was indeed *systematicity* emerging. The gesture coding included information about the form of a particular gesture segment, such as the number of manual articulators used (1 or 2 hands), as well as the referential target of the gesture (e.g., hat; pan; turn page). Based on the full sequences of the referential components that were uniquely expressed in each gesture, entropy was computed, which expresses compressibility of the gesture content, i.e., the amount of information that is needed to compress the signal set.  
+  When a lot of referential components in a gesture utterance recur between other gestures, such as in our theoretical case mentioned above, the system has a simpler structure and will show reuse of gestural components [e.g., @gibsonHowEfficiencyShapes2019]. Dovetailing with the qualitative observations and other studies in this field [e.g., @verhoefIconicityEmergenceCombinatorial2016], it was indeed found that gesture-component entropy decreased over the generations. Furthermore, the gestures were explicitly coded for the amount of marking for the functional category, and results showed that such gestures indeed occurred more often at later generations. Finally, average gesture duration - as a measure of communicative efficiency - did not reliably change over the generations, which ran counter to previous research showing reduction in complexity over repeated gesture use [@gerwingLinguisticInfluencesGesture2004; @hollerExperimentalInvestigationHow2011], as well as predictions that more mature communication systems tend towards maximal efficiency [@gibsonHowEfficiencyShapes2019].  
+  These results obtained in the lab resonate with findings from homesign [e.g., @havilandEmergingGrammarNouns2013] and emerging sign languages [@senghasChildrenCreatingCore2004]. For example, it has been shown that in the expression of motion events first generation signers of Nicaraguan sign language performed more holistic presentations of path and manner, while in following generations manner and path were segmented. Such segmentations afford novel combinatoriality and therefore increases generativity of a language. It expresses the meaning space with fewer individual components, similar to how the participants studied by @motamediEvolvingArtificialSign2019 started to compress the meaning space by developing ways mark functional status across referents (e.g., "agent", "action").  
+  As we see here, qualitative empirical grounding is crucial for ensuring a rich understanding of evolving multimodal signaling systems. In addition, manual gesture coding makes it possible to track and quantify gestural elements encoding referents and functional dimensions, and yields measures that can be used in quantifications of entropy and the emergence of structure over time. However, it does so at the cost of reducing rich multidimensional kinematic signals to discretized sequences of coded values from a limited set. And because of this, some aspects of the evolving systems remain outside of our reach. Can we approach these developing systems in a way that is more sensitive to their continuous and dynamic properties? Can we preserve observations of emerging structure and go beyond them to trace more fine-grained similarities over time and across generations? Might we even see how transmission chains develop their own gestural ‘dialects’ over time? These are the questions we aim to address using kinematic methods, from a theoretical perspective influenced by dynamical systems and biosemiotics.
+  
+# Current study
+
+  Here we build on data from this recent iterated learning paradigm with silent gestures [@motamediEvolvingArtificialSign2019]. With computer vision [@caoRealtimeMultiperson2D2017] we obtained motion traces of manual- and head gestures [see e.g., @lepicTakingMeaningHand2016; @ripperdaSpeedingDetectionNoniconic2020]. We then investigated kinematic interrelationships between gestures [e.g., @beecksEfficientQueryProcessing2016; @beecksSpatiotemporalSimilaritySearch2015; @satoAllAspectsLearning2020], where we leverage bivariate time series analysis (Dynamic Time Warping) with network topology analysis and visualization [@pouwGestureNetworksIntroducing2019; @pouwSemanticallyRelatedGestures2021]. Through this analysis we show that the study of gesture’s form can reveal the linguistic constraints of the kinematic system as a whole.  
+  
+ We hypothesized that over iterations:
+  
+* 1)	gesture kinematics become simpler.
+
+* 2)	gesture kinematic relationships become more systematic, and this scales with systematicity computed over gesture content from the original study.
+
+* 3)	the simplification of kinematics at the level of individual gestures is related to the systematicity of kinematic relationships across gestures.
+
+* 4)	idiosyncratic gesture cultures emerge as evidenced chains drifting away from each other over time.  
+
+Importantly, the prediction that gestures simplify is based on previous research reporting simplification as judged by human annotators [e.g., @gerwingLinguisticInfluencesGesture2004] and earlier kinematic findings [@namboodiripadMeasuringConventionalizationManual2016]. We extend this research, as well as the original study [@motamediEvolvingArtificialSign2019], with a detailed kinematic analysis of the simplification of evolving gestures, assessing how not only salience [@namboodiripadMeasuringConventionalizationManual2016], but also segmentation and temporality of gestures may change and simplify as they become part of a system of expression.  
+  Not all kinematic changes observed will be evidence of linguistic constraints however. Simplification over time, as in 1), could result simply from effort minimization. But when we observe increased systematicity in the system as a whole (2) as related to kinematic simplification (3), we have a direct indication of a systematically structuring communication system. Therefore, we assess whether a Shannon-based Entropy measure computed on kinematic relationships show that the systems becomes more structured (i.e., compressible). Using measures that are similar to the original study, we can then also compare whether the entropy of kinematics is related to the entropy of human-coded semantic content of the gesture. If so, we have a good evidence that linguistic constraints can be objectively studied from systematic changes in gesture form. Note, again, this is not just a methodological exercise to replicate original findings with automated methods. If we can show some equivalence between form and content analysis, then they are not on a qualitatively different analytic plane. If we can show that systematicity emerges over iterations without leaving the domain of kinematics, it means that a gesture’s form is more transparent to linguistic functioning than is currently assumed.    
+  Finally, with 4), we show how we can study chain-specific cultural evolutionary trajectories, by assessing the extent to which the communicative chains drift away from each other. The path-dependence of cultural evolution means that chains can diverge from one another over time, resulting in kinematic dialects. To assess this, we use cluster performance measures to quantify whether gestures within a chain tend to become more kinematically similar to each other and more dissimilar to gestures of other chains. This analysis is an example of the unique affordances of quantitative kinematic measures and will enable us to study, for the first time, the emergence of kinematic dialects.  
+  
+\pagebreak
+
+# Method  
+
+We will follow a bottom-up approach to the study of kinematics as communicative systems. In the first stage of our analysis, we demonstrate the specific changes that occur in the kinematics of the gestures. In a second stage, we assess possible systematic interrelationships in kinematic patterns of gestures through gesture network analysis [@pouwGestureNetworksIntroducing2019]. We will discuss each step in this procedure in the following sections, and finally discuss our main gesture network entropy measure. In the supplemental information we reserve extra space for sanity checks of automated processing and graphical descriptive results of the key measures.  
+
+```{r construct_matrices_and_save, results = 'hide', cache= TRUE, eval = FALSE}
+#NOTE this is the code that constructs individual level level gesture networks
+#This code takes a little time (up to 10 min) to run, and its output are all the distance matrices in the distance_matrices folder
+#The code chuck constructs:
+  #Individual level matrices: Which are 5chainsx5generationx2participants of size 24x24 (576 cells) (networktype = 1)
+  #seed level matrices:        Which are 5chains x with 24x24 matrices (networktype = 0)
+for(ch in c(c("chain1", "chain2", "chain3", "chain4", "chain5"))) #goes through all the chains
+{
+  for(gen in c(1:5))                                              #goes through all the generations
+  {
+   ts_sub <- subset(ts, chain == as.character(ch) & generation ==  as.character(gen)) #subset data for the curren generation and chain
+   #add relevant seeds
+   seed_sub <- subset(seeds,  seedsetnum %in% unique(ts_sub$seedsetnum))      #also collect for this chain the relevant seed videos used
+   ####################CONSTRUCT INDIVIDUAL LEVEL NETWORKS
+   for(p in unique(ts_sub$ppn))                                               #loop through participant
+   {
+     print(paste0("working on individual level network:", p))                 #print a progress statement to the console
+     tsp <- subset(ts_sub, ppn == p)                                          #select only the data for this participant
+     network_p <- matrix(nrow = length(unique(tsp$object)), ncol = length(unique(tsp$object))) # make a new matrix
+
+       for(g1 in unique(tsp$object))
+       {
+          #get index information for this gesture 1
+          indexa <- as.numeric(which(unique(tsp$object)==g1))
+
+          for(g2 in unique(tsp$object))
+          {
+          #get index information for this gesture 2
+            indexb <- as.numeric(which(unique(tsp$object)==g2))
+
+            if(is.na(network_p[indexa, indexb])) #this statements makes sure that no computations are made unnessecarily
+            {
+            ts1 <- subset(tsp, object == g1)
+            ts2 <- subset(tsp, object == g2)
+            ts1 <- extractR.traces(ts1)
+            ts2 <- extractR.traces(ts2)
+            dist <- DTW.compare(ts1, ts2, "NA")
+            
+            #fill network
+            network_p[indexa, indexb] <- dist
+            network_p[indexb, indexa] <- dist #the matrix is symmetric so you can fill two cells Mij and Mji
+            }
+          }
+       }
+     #WRITE PARTICIPANT LEVEL NETWORK (priority)
+          #FILENAMe: NETWORKTYPE_CHAIN_GEN_PPN
+      colnames(network_p) <- as.character(unique(tsp$object))
+      write.csv(network_p, paste0(matrices_data, "1_", ch, gen,p, ".csv"), row.names = FALSE)
+    }
+  }
+}
+
+#construct a generation level cross-chain matrix to see how drift towards the arbitrary emerges
+  #these are a lot of computations, so we utilize parallel processing for this script
+numCores <- detectCores() #how many cores?
+
+    #make a function which is the main operation for parallel computing
+    dwarp.comb <- function(listcombs, traces, tsids)
+    {
+    listcombs <- str_split_fixed(listcombs, ",", 2)
+    indexa <- tsids==listcombs[,1]
+    indexb <- tsids==listcombs[,2]
+    distances <- DTW.compare(traces[indexa,], traces[indexb,], "NA")
+    return(distances)
+    }
+
+ts$id <- paste0(ts$object, ts$ppn) #make a unique id
+for(gen in c(1:5))                                              #goes through all the generations
+  {
+  #get a list of all gestures
+  traces <- extractR.traces(ts[ts$generation==gen,]) 
+  tsids <- ts$id[ts$generation==gen]
+  ids <-   unique(tsids)
+  chains <- objects <- vector()
+    for(i in ids)
+    {
+      chains <- c(chains, unique(ts$chain[ts$id==i]) )
+      objects <- c(objects, unique(ts$object[ts$id==i]))
+    }
+  
+  print(paste0("processing generation ", gen, " ---started at", Sys.time()))
+        listcombs <- expand.grid(ids, ids) #make combination of all these gestures
+        listcombs <- listcombs[1:(nrow(listcombs)/2),]
+        listcombs <- paste(listcombs[,1],listcombs[,2], sep=",")
+        distancest <- unlist(parallelsugar::mclapply(listcombs, traces, tsids, FUN = dwarp.comb, mc.cores = numCores))
+  print(paste0("processed generation ", gen, " ---ended at", Sys.time()))
+  
+  
+  fullmat <- matrix(ncol = length(ids), nrow = length(ids))
+  fullmat[upper.tri(  fullmat, diag=FALSE)] <-  fullmat[lower.tri(  fullmat, diag=FALSE)] <- distancest[distancest!=0]
+  colnames(fullmat) <- chains
+  rownames(fullmat) <- objects
+  
+  write.csv(fullmat, paste0(matrices_data, "C_",gen,".csv"))
+  }
+
+```
+
+```{r main method figure, results = 'hide', cache= TRUE, eval = FALSE}
+#extract a time series to show in the method figure
+exm <- ts[ts$generation=="s" & ts$seedsetnum == "arrest1",]
+
+si = 3
+ggplot(exm, aes(x=time_ms)) + geom_line(aes(y = x_nose),size= si, color = "red") + 
+                              geom_line(aes(y = y_nose),size= si, color = "red") +
+                              geom_line(aes(y = x_index_left),size= si, color = "purple")+
+                              geom_line(aes(y = y_index_left),size= si, color = "purple")+
+                              geom_line(aes(y = x_index_right),size= si, color = "green")+
+                              geom_line(aes(y = y_index_right),size= si, color = "green")+
+                              geom_line(aes(y = x_wrist_left),size= si, color = "blue")+
+                              geom_line(aes(y = y_wrist_left),size= si, color = "blue")+
+                              geom_line(aes(y = x_wrist_right),size= si, color = "cyan")+
+                              geom_line(aes(y = y_wrist_right),size= si, color = "cyan")+theme_bw()
+``` 
+\pagebreak
+
+
+Figure 2. Design experiment and openpose tracking  
+```{r plotmainmethodfigurea, echo = FALSE, warning = FALSE}
+library(raster)
+#load in the finally edited time series example
+mypng <- stack(paste0(plotfolder, "/MethodPlot/main_method_v3a.png"))
+plotRGB(mypng,maxpixels=1e500000)
+
+```
+*Note Figure 2*. First steps of the general procedure. A) shows the original experiment setup (Motamedi et al., 2019), where a seed set of 24 gestures was randomly selected for each chain containing five generations. Seed gestures were used to train the first generation of each chain; after that, gestures from the previous generation were used as training data. Participants then communicated gesturally about the same concepts. B) For our analysis we first performed video-based motion tracking with OpenPose [@caoRealtimeMultiperson2D2017] to extract relevant 2D movement traces ($T_{i}$) for each gesture *g* for body key points *i* (nose, the wrists and index fingers). After motion tracking the next steps were dynamic time warping and gesture network analysis (Figure 3).
+
+## Participant, design, & procedure of the original study (experiment 1)  
+  Here we discuss the setup of the experiment which generated the data we reanalyzed (for more detailed information see Motamedi et al., 2019).  
+ A seed gesture set was created with 48 pre-study participants who each depicted 1 out of 24 concepts. Thus for each concept there were two seed gestures performed by unique pre-study participants. Given that pre-study participants only produced one gesture, they were isolated from the other concepts that comprised the meaning space.  
+For the main experiment (exp. 1) 50 right-handed English-speaking non-signing participants were recruited. They were allocated pairwise to one of 5 iteration chains. Participants were first shown a balanced subset of 24 unique seed gestures. These chain-specific seed gesture sets will be referred to as generation 0, which were followed by generations 1 through 5. In the training phase, gestures were presented in random order and participants were asked to identify the meaning of the gesture from the 24-item meaning space, followed by feedback about their performance. They were then asked to self-record their own copy of the gesture. Participants trained with a subset of 18 items (out of 24), and completed two rounds of training.  
+In the testing phase, participants took turns as director and matcher to gesturally communicate (without using speech) and interpret items in the meaning space, with feedback following each trial. This director-matcher routine was repeated until both participants communicated all 24 meanings. Subsequent generations were initiated with new dyads whose training set was the gestures from one randomly selected participant from the prior generation.  
+The recorded videos of the seed gestures and the gesture utterances participants produced in the testing phases are the data we use here. This means that we have 50 participants conveying 24 concepts = 1200 gesture videos belonging to generations 1-5, and 48 seed gesture videos with each concept conveyed by two unique seed participants. This forms the primary data that we reanalyse using kinematic methods.
+
+## Motion tracking
+  Motion tracking was performed on each video recording with a sampling rate of 30Hz. To extract movement traces, we used OpenPose [@caoRealtimeMultiperson2D2017], which is a pre-trained deep neural network approach for estimating human poses from video data [for a tutorial see @pouwMaterialsTutorialGespin20192019]. We selected keypoints that were most likely to cover the gross variability in gestural utterances: positional x (horizontal) and y (vertical) movement traces belonging to left- and right index fingers and wrists, as well as the nose. For all position traces and their derivatives, we applied a 1st order 30Hz low-pass Butterworth filter to smooth out high-frequency jitters having to do with sampling noise. We z-normalized and mean-centered position traces for each video to ensure that differences between subjects (e.g., body size) and within-subject differences in camera position at the start of the recording were inconsequential for our measurements.
+
+## Kinematic Properties
+```{r kinematic_calcs, echo = FALSE, message = FALSE, warning = FALSE}
+#plot for checking algorithm
+tstemp <- ts              #create a temporary copy of the time series data
+tstemp$identifier <- paste0(tstemp$generation, tstemp$ppn, tstemp$chain, tstemp$object)  #make an identifier for each video
+
+dimjerk <- peaks <- vector()
+feats <- data.frame()
+for(i in unique(tstemp$identifier)) #go through all time series and extract the kinematic features using the custom function
+{ 
+  cc <- tstemp[tstemp$identifier == i,] #also get the data from human codings (repetitions, infnormation units, and segments)
+  get <- cbind(kin.get(cc), cc$ann_reps[1], cc$ann_inf_units[1], cc$segments[1])
+  feats <- rbind.data.frame(feats, get)
+}
+colnames(feats) <- c(colnames(feats[1:5]), "repetitions", "inf_units", "segments")
+
+feats$smoothness <- log(feats$smoothness)     #this measure tends to explode at high values, so we log scale them
+feats$submovements <- log(feats$submovements) #thus measure tends to explode at high values, so we log scale them
+
+#correlations to report (intermittency and rhythm measure)
+cx <- cor.test(feats$smoothness, feats$rhythm)
+cxt <- c(round(cx$estimate, 2),ifelse(cx$p.value < .001, "< .001", round(cx$p.value, 3)))
+
+```
+
+  We first selected five potential measures representative of kinematic quality of the movements in terms of segmentation, salience and temporality, namely submovements, intermittency, gesture space, rhythm, and temporal variability (or rhythmicity). See Figure 3 for two example time series from which most measures can be computed. All measures were computed for each key point’s time series separately and then averaged so as to get an overall score for the multimodal utterance as a whole. Based on these exploratory measures we eventually selected three measures tracking gtracking gesture salience (gesture space), gesture segmentation (intermittency), and gesture temporality (temporal variability). We discuss the motivations for selecting each measure below. Correlations between these variables and distributions are shown in supplementary materials, Figure S1. 
+
+## Gesture salience
+  As a measure for gesture salience or reduction, we computed a gesture space measure. This was determined by extracting the maximum vertical amplitude of a key point multiplied by the maximum horizontal amplitude, i.e., the area in pixels that has been maximally covered by the movement.
+
+## Gesture segmentation
+  We first computed a submovement measurement similarly implemented by @trujilloMarkerlessAutomaticAnalysis2019. Submovements are computed with a basic peak finding function which identifies and counts maxima peaks in the movement speed time series. We set the minimum inter-peak distance at 8 frames, and minimum height = -1 (z-scaled; 1 std.), minimum rise = 0.1 (z-scaled).  
+  One property of the submovement measure is that it discretizes continuous information and uses arbitrary thresholds for what counts as a submovement, thereby risking information loss about subtle intermittencies in the movement. To have a more continuous measure of intermittency (the opposite of smoothness) of the movement we computed a dimensionless jerk measure [@hoganSensitivitySmoothnessMeasures2009]. This measure is dimensionless in the sense that it is scaled by the maximum observed movement speed and duration of the movement. Dimensionless jerk is computed using the following formula:
+  
+  $$\int_{t2}^{t1} x''' (t)^{2}dt* \frac{D^{3}}{max(v^{2})}$$
+  
+  Here $x'''$ is jerk (second derivative of the speed), which is squared and integrated over time and multiplied by duration $D$ cubed over the maximum squared velocity $max(v^{2})$. We show in the supplementary materials (see supplemental figure S2) that this measure correlates very highly with submovements, thus we chose to only use intermittency for further analysis. Note that a *higher* intermittency score indicates more intermittent (less smooth) movement. We log transformed our smoothness measures due to skewed distributions.
+  
+### Gesture temporality
+  From the submovement measure we computed the average interval between each submovement (in Hz), which is a measure of rhythm tempo. This measure was, as expected, highly correlated with intermittency score (see S2), as tempo goes up when more segmented movements are performed in the same time window, *r* = `r printnum(cxt[1])`, *p* = `r printnum(cxt[2])`, which led us to drop this measure for our analysis. Instead, we use another temporal measure that is more orthogonal to intermittency and gesture space, and which captures the stability of the rhythm; the temporal variability of the movements. This measure is simply the standard deviation of the temporal interval between submovements (given in Hz): a higher score indicates more temporal variability and a lower score indicates more isochronous rhythm. Note that this measure cannot be calculated when there are less than 3 submovements (i.e., when there no intervals in which we can detect the temporal variability).  
+
+Figure 3. Overview kinematic measures  
+```{r plotjerk, echo = FALSE, warning= FALSE, fig.height=2.90, fig.width = 7}
+#for method jerk plots
+  #example 1
+exm <- ts[ts$time_ms > 0 & ts$generation=="s" & ts$seedsetnum == "arrest2",] #extract sample from the data
+exm$velocity_right_w <- as.vector(scale(exm$velocity_right_w)) #z-scale the speed vector
+
+#extract peaks
+peaksexm <- findpeaks(exm$velocity_right_w,minpeakdistance = 8,  minpeakheight = -1, threshold=0.1) #apply peakfinder function to the time series, with the same thresholds as our kin.get function given at the custom function section
+exm$peak <- ifelse(exm$time_ms %in% exm$time_ms[peaksexm[,2]], exm$velocity_right_w, NA) #save the peak height into the time series by matching with the time
+exm$peaktime <- ifelse(exm$time_ms %in% exm$time_ms[peaksexm[,2]], exm$time_ms, NA) #save the peak time into the time series by matching with the time
+
+smoothness <- smooth.get(exm$velocity_right_w) #apply the custom function calculating smoothness
+rhythmicity <- sd(abs(diff(exm$time_ms[peaksexm[,2]]))/1000) #compute the st. dev. time interval between peaks, and divide by 1000 ms to get Hz
+
+
+#left plot
+a <- ggplot(exm) + geom_line(aes(x=time_ms, y = velocity_right_w)) +
+  geom_point(aes(x = peaktime, y = peak), color = "red", size = 2) +
+    annotate("text", label= paste0("submovements = ", nrow(peaksexm)), x=1750, y=2.15)+
+  annotate("text", label = paste0("intermittency = ", round(log(smoothness)), round = 2), x=1750, y=1.80) +
+    annotate("text", label = paste0("temporal var. = ", round(rhythmicity,2)), x=1750, y=1.35) +
+  xlab("time (ms)") +
+  ylab("speed right wrist (z-scaled)")+
+  theme_bw()
+ 
+#right plot (NOTE, this repeats what is done above)
+exm5 <- ts[ts$time_ms > 0 & ts$generation=="5" & ts$chain == "chain5" & ts$seedsetnum == "arrest2" & ts$ppn == "full50",]
+exm5$velocity_right_w <- as.vector(scale(exm5$velocity_right_w))
+
+peaksexm5 <- findpeaks(as.vector(scale(exm5$velocity_right_w)),minpeakdistance = 8,  minpeakheight = -1, threshold=0.1)
+exm5$peak <- ifelse(exm5$time_ms %in% exm5$time_ms[peaksexm5[,2]], exm5$velocity_right_w, NA)
+exm5$peaktime <- ifelse(exm5$time_ms %in% exm5$time_ms[peaksexm5[,2]], exm5$time_ms, NA)
+
+smoothness <- smooth.get(exm5$velocity_right_w)
+rhythmicity <- sd(abs(diff(exm5$time_ms[peaksexm5[,2]]))/1000)
+
+b <- ggplot(exm5) + geom_line(aes(x=time_ms, y = velocity_right_w)) +
+  geom_point(aes(x = peaktime, y = peak), color = "red", size = 2) +
+    annotate("text", label= paste0("submovements = ", nrow(peaksexm5)), x=3000, y=2.15)+
+  annotate("text", label = paste0("intermittency = ", round(log(smoothness)), round = 2), x=3000, y=1.80) +
+    annotate("text", label = paste0("temporal var. = ", round(rhythmicity,2)), x=3000, y=1.35) +
+  xlab("time (ms)") +
+  ylab("speed right wrist (z-scaled)")+
+  theme_bw()
+
+grid.arrange(a,b, nrow=1)
+```  
+*Note Figure 3*. \small Two time series showing right-hand wrist speed in two different trials.  Our measures of segmentation and temporal variability are computed from time series like this. SEGMENTATION captures the amount of submovements (observed peaks in red), so the first time series is more segmented than the second. INTERMITTENCY captures similar information in a continuous fashion using rates of change in acceleration, yielding a higher score for the first time series than for the second. TEMPORAL VARIABILITY captures the rhythmicity of the signal, and is operationalized in terms of the regularity of temporal intervals between submovements. In the first plot, red dots occur at relatively equal temporal intervals (lower temporal variability), whereas in the second, the temporal intervals are highly unequal (higher temporal variability. Finally, gesture space was calculated from the size of x,y position traces not shown here.  \normalsize
+
+\pagebreak  
+
+## Human coding and kinematic measures
+  For information about how these automated kinematic measures approximate hand-coded data from Motamedi and colleagues (2019), see supplemental figure S2. The hand-coded data consisted of the amount of unique information units of the gesture utterance, the number of repetitions in the utterance, as well as the number of segments (information units + repetitions). We should predict that our kinematic intermittency score should correlate with the number of segments, repetitions and information units as the kinematics will have to carry those information units by contrasts in the trajectories. Supplemental Figure S2 shows the correlations for our kinematic measures and the human-coded gesture information. It shows that the amount of information units (unique, repeated, or total) in the gesture as interpreted by a human coder reliably correlate with kinematic intermittency (more intermittent, more human-coded information units), gesture space (larger space, more information units) and temporal variability (more stable rhythm, more information units).  
+
+## Dynamic Time Warping
+  Dynamic Time Warping (DTW) is a common signal processing algorithm to quantify similarity between temporally ordered signals [@giorginoComputingVisualizingDynamic2009;  @mueenExtractingOptimalPerformance2016a; @mullerInformationRetrievalMusic2007]. The algorithm performs a matching procedure between two time series by maximally realigning (warping) nearest values in time while preserving order, and comparing their relative distances after this non-linear alignment procedure. The degree that the two time series diverge after warping indicates how dissimilar they are. This dissimilarity is expressed with the DTW distance measure, with a higher distance score for more dissimilar time series and a lower score for more similar time series.  
+  The time series in the current instance are multivariate, as we have a horizontal (x) and vertical (y) positional time-series data. However, DTW is easily generalizable to multivariate data, and can compute its distances in a multidimensional space, yielding a multivariate dependent variant of DTW. We opt for a dependent DTW procedure here as x and y positional data are part of a single position coordinate in space. Additionally, we have 6 of these 2-dimensional time series for each body key point. To compute a single distance measure between gestures, we computed for each gesture comparison a multivariate dependent DTW Distance measure per key point, which was then summed for all keypoint comparisons to obtain a single Distance measure D (illustrated in Figure 5). The D measure thus reflects a general dissimilarity (higher D) or similarity (lower D) of the whole manual+head movement utterance versus another utterance. Note the DTW procedure is applied on the entire gesture utterance, which could consist of multiple components (e.g., hand cuff gesture + pointing).    
+  We used the R package ‘DTW’ [@giorginoComputingVisualizingDynamic2009] to produce the multivariate distances per keypoint. The DTW distance measure was normalized for both time series’ length, such that average distances are expressed per unit time, rather than summing distances over time which would yield higher (and biased) distance estimates for longer time series (i.e., longer gesture videos). For further conceptual overview and methodological considerations of our DTW procedure see @pouwGestureNetworksIntroducing2019.  
+```{r compute_measure_check, echo = FALSE, results = 'hide', message = FALSE, warning = FALSE}
+sub_ts <- subset(ts, as.character(generation) == "1")   #keep 1 generation gestures
+seeds  <- subset(ts, as.character(generation) ==  "s")  #keep only seed gestures
+
+chainnum <- D <- Dran <- Dman <- Dranman<- vector() #initialize vectors to be filled and combined into data set for statistical analysis
+for(chs in unique(sub_ts$chain)) #loop through all the chains (note we are going to make smaller and smaller data sets to loop faster)
+{
+        print(paste0("working on chain: ", chs)) #print something to see progress
+
+    sub_ts_temp <-  subset(sub_ts, chain == chs) #make a smaller data.frame for this chain
+    for(pp in unique(sub_ts_temp$ppn))           #for this chain data loop through participants
+    {
+       sub_ts_temp2 <- subset(sub_ts_temp, as.character(ppn) == pp) #make a smaller data.frame for this chain, participant
+       
+        for(obj in unique(sub_ts_temp2$object))  #make a smaller data.frame for this chain, particpant, object
+        {
+        #true pair (make a comparison pair to DTW, with one current reference and the origin seed)
+        tt1 <- subset(sub_ts_temp2, as.character(ppn) == pp & as.character(object) == obj) #reference data
+        sobject <- as.character(unique(tt1$seedsetnum))                              #which seed video is was the origin of the current?
+        tt2 <- subset(seeds, as.character(seedsetnum) ==  sobject)     #get the exact seed based on seed list and object
+        
+        #random paired (make a comparison pair to DTW, with one current reference and a random [and unrelated] origin seed)
+        listotherobjects <- unique(sub_ts_temp2$object[sub_ts_temp2$object != obj & 
+                                                        sub_ts_temp2$theme !=  unique(tt1$theme) &
+                                                        sub_ts_temp2$functional != unique(tt1$functional)]) #subset objects which are not the same reference,theme,                                                                                      and function 
+        pickranobject    <- sample(     listotherobjects , 1)                 #pick randomly an object from that list
+        tt2r <- subset(seeds, as.character(object) == pickranobject)          #extract random test data
+          
+      #Extract relevant traces to be inputted for DTW
+        MT1   <- extractR.traces(tt1)
+        MT2   <- extractR.traces(tt2)
+        MT2r  <- extractR.traces(tt2r)
+        
+      #perform DTW distance calc for actual and random pair
+       DTWpair    <-  DTW.compare(MT1, MT2, "NA")
+       DTWranpair <-  DTW.compare(MT1, MT2r, "NA")
+          #also perform same comparisons for only manual movements (excluding head movements)
+       DTWpair_man    <-  DTW.compare(MT1, MT2, "manual_only")
+       DTWranpair_man <-  DTW.compare(MT1, MT2r, "manual_only")
+  
+      #collect into dataset for statistical analysis
+      chainnum <- c(chainnum, chs)
+      D        <- c(D, DTWpair) 
+      Dran     <- c(Dran, DTWranpair)
+      Dman     <- c(Dman,   DTWpair_man)
+      Dranman  <- c(Dranman, DTWranpair_man)
+    }
+  }
+}
+
+#bind into a dataset for statistical analysis of measure accuracy
+t <- cbind.data.frame(chainnum,  D)
+t2 <- cbind.data.frame(chainnum,  Dran)
+tm1 <- cbind.data.frame(chainnum,  Dman)
+tm2 <- cbind.data.frame(chainnum,  Dranman)
+t$pairtype <- tm1$pairtype <- "true pair"
+t2$pairtype  <- tm2$pairtype <- "random pair"
+colnames(t) <- colnames(t2) <- colnames(tm1) <-colnames(tm2) <- c("chain", "DTWdistance", "pair")
+
+#compare Distances random-true pairs
+mcheck <- rbind.data.frame(t,t2)
+test <- t.test(mcheck$DTWdistance~mcheck$pair)
+D  <- cohen.d(mcheck$DTWdistance, mcheck$pair)$estimate
+diff1 <- mcheck$DTWdistance[mcheck$pair == "random pair"]-mcheck$DTWdistance[mcheck$pair == "true pair"]
+#compare Distances random-true pairs for only the manual
+mcheckman <- rbind.data.frame(tm1,tm2)
+Dman  <- cohen.d(mcheckman$DTWdistance, mcheckman$pair)$estimate
+diff2 <- mcheckman$DTWdistance[mcheck$pair == "random pair"]-mcheckman$DTWdistance[mcheck$pair == "true pair"]
+
+#make a dataset that compares differences in head included or head excluded DTW distances
+comb <- as.data.frame(c(diff1,diff2))
+comb$inc <- c(rep("head included" , length(diff1)), rep("head excluded", length(diff2)))
+test_maninc <- t.test(comb[,1]~comb$inc)
+
+```
+  As a demonstration that our D measure reflects actual differences in kinematics, we computed for each individual in each chain the difference between a gesture seed and the gesture that the individual produced to copy it, for generation 1. These “true pairs” must be maximally similar (lower D) as the individual produced their copied gesture shortly after first exposure in the training phase, which should lead to high faithfulness in reproduction. We contrast this with a false or random comparison of the same gesture in generation 1 with a gesture seed that was neither in the same functional nor thematic category. These false random pairs must be more dissimilar, and should produce higher DTW distances.
+  Figure 3 shows the distributions of the distances observed. DTW distance distributions were reliably different, *t* (`r printnum(round(test$parameter, 2))`) = `r printnum(round(test$statistic, 2))`, *p* = `r printnum(ifelse(test$p.value < .001, "< .001", test$p.value))`, Cohen's *d* =  `r printnum(round(D, 2))`, for the true pair, *M* =`r printnum(mean(mcheck$DTWdistance[mcheck$pair =="true pair"]))`(*SD* = `r printnum(sd(mcheck$DTWdistance[mcheck$pair =="true pair"]))`), as compared to the random pair, *M* = `r printnum(mean(mcheck$DTWdistance[mcheck$pair =="random pair"]))`(*SD* = `r printnum(sd(mcheck$DTWdistance[mcheck$pair =="random pair"]))`).  
+  We find that adding head movement trajectory to our D calculation significantly increases false-real pair discriminability as compared when we compute our D measure on only manual keypoints (left/right wrist and index fingers), change in Cohen's *d* = `r printnum(round(D-Dman, 2))`, change D real vs. false = `r printnum(mean(comb[,1][comb$inc == "head included"])-mean(comb[,1][comb$inc == "head excluded"]))`, *p* = `r printnum(ifelse(test_maninc$p.value < .001, "< .001", test_maninc$p.value))`. Therefore, we conclude that in the current experiment the gesture utterances are also crucially defined by head movements as well. This is a novel finding in and of itself, and demonstrates the multi-articulatory nature of silent gestures.
+
+Figure 4. Density distributions of D for true pairs and random pairs  
+```{r plot_distributioncheck, echo = FALSE, message = FALSE, warning = FALSE, fig.width=6, fig.height=3}
+tm <- mean(mcheck$DTWdistance[mcheck$pair =="true pair"])
+fm <- mean(mcheck$DTWdistance[mcheck$pair =="random pair"])
+
+colors <- brewer.pal(n = 2, name = "Set1")
+a <- ggplot(mcheck, aes(x = DTWdistance, color = pair, fill= pair)) + geom_density(size = 2, alpha= 0.2) + geom_vline(xintercept = fm, linetype = "dashed", color = colors[1], size = 2) + geom_vline(xintercept = tm, linetype = "dashed", color = colors[2], size = 2) +
+  scale_colour_manual(values=colors)+
+  theme_bw() +  theme(panel.grid.major = element_blank()) + xlab("DTW distance")
+a
+```
+
+*Note Figure 4*. Density distributions of D are shown for the random versus real pairs. With D based on head-, wrist- and finger movement there is good discriminability between real versus falsely paired gestures, confirming that our approach is tracking gesture similarity well.
+
+## Gesture kinematic networks
+  Graphically shown in Figure 5D, we constructed for each participant (nested in generation and chain), as well as each seed gesture set (seed set belonging to that chain), a distance matrix **D**, containing the continuous D comparisons for each gesture $D_{i,j}$ produced by that participant with each other gesture produced by that participant, yielding a 24x24 matrix. The diagonal contains zeros for gesture comparisons that are identical ($D_{i,j} = 0 | i=j$). These characteristics make **D** a weighted symmetric distance matrix.  
+  For each distance matrix we can construct a visual geometric representation of its topology by projecting the distance of gesture tokens on a 2d plane using a dimensionality reduction technique called "t-SNE", a variant of Stochastic Neighbor Embedding [@maatenVisualizingDataUsing2008]. These 2-d representations show locations of gesture nodes, with distances between gesture nodes approximating our D measure. Such 2D representations are imperfect approximations of the underlying multidimensional data and are only used as visual aids. The uncompressed distance matrices are used to calculate entropy and other measures. We refer to these measurements as ‘network properties’ as these measures are intuitively understood in network or geometric terms. For calculations of network entropy we use the R package ‘igraph’ [@csardiPackageIgraphNetwork2019], and for dimensionality reduction we use R package ‘tsne’ [@donaldsonTsneTDistributedStochastic2016]. On our supplemental page we again show video examples of all the gestures produced in generation 1 versus generation 5 for a particular chain (chain 1), but now with videos spatially located according to their coordinates in kinematic space (https://osf.io/wbmf9/). Examples are highlighted in red, where kinematic similarity increases from generation 1 to 5 due to functional markers being used for the category "location".   
+  
+Figure 5. General method gesture network analysis 
+```{r plotmainmethodfigureb, echo = FALSE, warning = FALSE}
+library(raster)
+#load in the finally edited time series example
+mypng <- stack(paste0(plotfolder, "/MethodPlot/main_method_v3b.png"))
+plotRGB(mypng,maxpixels=1e500000)
+
+```
+*Note Figure 5*. C) For each gesture comparison within a gesture set, the time series were then submitted in to a Dynamic Time Warping procedure where we computed for each body part a multivariate normalized distance measure, repeated for all body parts and summed, resulting in one overall distance measure D for each gesture comparison. D) All distance measures were saved into a matrix **D** containing all gesture comparisons $D_{i,j}$ within the comparison set, resulting in a 24x24 distance matrix. The distance matrix can be visualized as a fully connected weighted graph through dimensionality reduction techniques, such that nodes indicate gesture utterances and the distance (or weight) between gesture nodes representing the 'D' measure, indicating dissimilarity. \normalsize 
+  
+```{r for_videochain1, echo = FALSE, include = FALSE, message = FALSE, eval =FALSE}
+#this script makes an example network of chain 1 generation 1 and 5 where the videos for the animation video are later added in
+mat1 <- read.csv(paste0(matrices_data, "1_chain11full1.csv"))
+mat5 <- read.csv(paste0(matrices_data, "1_chain15full9.csv"))
+
+top1 <- tsne(as.dist(mat1), perplexity =5) #apply tsne for plotting 2d
+top5 <- tsne(as.dist(mat5), perplexity =5) #apply tsne for plotting 2d
+
+top1 <- cbind.data.frame(top1, colnames(mat1))
+top5 <- cbind.data.frame(top5, colnames(mat5))
+
+colnames(top1) <- c("Xpos", "Ypos", "grouping")
+colnames(top5) <- c("Xpos", "Ypos", "grouping")
+
+#plot both networks
+p1 <- ggplot(top1, aes(x= Xpos, y = Ypos, group =grouping)) + geom_point(size= 20, alpha =0.5)+ theme_void()  + theme(legend.position = "none") + scale_color_brewer(palette = "Set2")
+p5 <- ggplot(top5, aes(x= Xpos, y = Ypos, group =grouping)) + geom_point(size= 20, alpha =0.5)+ theme_void()  + theme(legend.position = "none") + scale_color_brewer(palette = "Set2")
+
+subplot(ggplotly(p1), ggplotly(p5)) #plot left and right subplot with plotly
+
+
+```
+  
+  
+### Kinematic Entropy
+ Entropy is a measure that quantifies the compressibility of data structures, and has been used to gauge the combinatorial structure of communicative tokens in the field of language evolution [e.g., @verhoefIconicityEmergenceCombinatorial2016; for theoretical grounding see @gibsonHowEfficiencyShapes2019]. In the original experiment, Motamedi and colleagues (2019) computed entropy from the gesture content codings, which captured recurrent information units between gestures. In our case, entropy quantifies the degree to which there are similar or more diverse edge lengths (i.e., similar/diverse levels of dissimilarity 'D' between combinations of two gesture trajectories). If they are more similar, lower entropy reflects that communicative tokens relate to each other in more structural ways. So our measure of network entropy gauges how compressible kinematic interrelationships are, which is conceptually related to the systematic recurrence of information units between the human judged gesture content.
+  The network entropy measure we used [see @eagleNetworkDiversityEconomic2010] is almost identical to a classic Shannon entropy calculation used in the original study to quantify the systematicity of the gesture's content [@motamediEvolvingArtificialSign2019], where $Entropy\; H(X) = -\sum p(X)\log  p(X)$. The only difference is that our measure is computed on the distances for each node relative to the shortest path to the other nodes, and then normalized by the number of gesture distances. So our measure quantifies the topological diversity of the gesture relationships, where a lower score indicates more similar relationships and a higher score indicates a more randomly distributed set of relationships.
+  Specifically, for each gesture node we compute the diversity of kinematic distances to other gestures, using a scaled Shannon Entropy measure:  
+  
+   $$\; H(i) = -\sum_{j=1}^{k} p_{ij}\log  p_{ij}/log(k_i)$$  
+   
+   Here, $k_i$ is the number of gesture connections for gesture $i$, and $p_{ij}$ is the proportional distance: 
+   
+   $$p_{ij} = D_{ij} / \sum_{j=1}^{k}D_{ij}$$
+   
+   Here $p_{ij}$ is the distance between gesture $i$ and gesture $j$ divided by the total distance involving gesture $i$.  Figure 6 shows a graphical example of different network structures and the concomittant entropy measure.
+  
+Figure 6. Example network entropy   
+
+```{r entropy_explanation, echo = FALSE, warning = FALSE, cache = TRUE, fig.width=3,  fig.length=6}
+set.seed(12)
+matrix_lowstruc <- matrixhigh_struc <- matrixhigh_function <- matrix(nrow = 24, ncol = 24)
+
+plot.networktsne <- function(top, title,cluster1, ellipse)
+{
+  top <- cbind.data.frame(top, cluster1)
+  colnames(top) <- c("Xpos", "Ypos", "grouping")
+  pl <- ggplot(top, aes(x= Xpos, y = Ypos, color =grouping)) + geom_point(size= 2)
+  if(ellipse == TRUE){pl <- pl + stat_ellipse(type = "t", level =0.60)}
+  pl <- pl+  theme_void()  + theme(legend.position = "none")+ ggtitle(title) + scale_color_brewer(palette = "Set2")
+  return(pl)
+}
+
+#fill some matrices with normally distributed high low distances and random
+
+#low variance network
+lowhidist <- matrix(runif(24*24, min = 10, max = 20), nrow = 24, ncol = 24)
+lowhidist[1:4,1:4] <- rnorm(n = 16, mean = 5, sd = 1)
+lowhidist[5:8, 5:8] <- rnorm(n = 16, mean = 5, sd = 1)
+lowhidist[9:12, 9:12] <- rnorm(n = 16, mean = 5, sd = 1)
+lowhidist[13:16,13:16] <- rnorm(n = 16, mean = 5, sd = 1)
+lowhidist[17:20, 17:20] <- rnorm(n = 16, mean = 5, sd = 1)
+lowhidist[21:24, 21:24] <- rnorm(n = 16, mean = 5, sd = 1)
+cluster1 <- c(rep("theme 1", 4), rep("theme 2", 4), rep("theme 3", 4), rep("theme 4", 4), rep("theme 5", 4), rep("theme 6", 4))
+
+#high variance network
+SDhidist <- matrix(runif(24*24, min = 10, max = 20), nrow = 24, ncol = 24)
+SDhidist[1:4,1:4] <- rnorm(n = 16, mean = 5, sd = 5)
+SDhidist[5:8, 5:8] <- rnorm(n = 16, mean = 5, sd = 2)
+SDhidist[9:12, 9:12] <- rnorm(n = 16, mean = 5, sd = 5)
+SDhidist[13:16,13:16] <- rnorm(n = 16, mean = 5, sd = 2)
+SDhidist[17:20, 17:20] <- rnorm(n = 16, mean = 5, sd = 5)
+SDhidist[21:24, 21:24] <- rnorm(n = 16, mean = 5, sd = 2)
+
+#random network
+randist <- matrix(runif(24*24, min = 10, max = 20), nrow = 24, ncol = 24)
+
+#get 2d projectsion using tsne
+toplowhidist <- as.data.frame(tsne(as.dist(lowhidist), perplexity =12))
+topmedhidist <- as.data.frame(tsne(as.dist(SDhidist), perplexity =12))
+toprandist   <-  as.data.frame(tsne(as.dist(randist), perplexity =12))
+
+
+#plot 2-d with entropy value
+a <-  plot.networktsne(toplowhidist, paste0("lower entropy: ", round(ent.N(lowhidist),3)),cluster1, TRUE)
+b <-  plot.networktsne(topmedhidist, paste0("medium entropy: ",  round(ent.N(SDhidist),3)), cluster1, TRUE)
+c <-  plot.networktsne(toprandist, paste0("higher entropy: ",  round(ent.N(randist),3)),cluster1, TRUE)
+  
+grid.arrange(a, b,c, nrow = 3)
+
+
+```
+
+*Note Figure 6*. Simulated data showing 6 clusters with low variance in distances (top panel), higher variance (middle panel), or randomly distributed distances (lower panel). More variable and random distributions of node distances yield higher entropy scores. In contrast, entropy is lowest when interrelationships are distributed in a more systematic way (top panel). 
+
+# Main Results  
+  We first report changes in kinematic features over generations. Then we consider change in relations between communicative tokens over generations, as indexed by kinematic network entropy. We also relate kinematic changes to network-level changes. Finally, we consider how chains diverge over time, allowing a peek into the emergence of unique gesture cultures.  
+  
+## Kinematic features
+  A key aim of our analysis is to capture the fine-grained kinematic features that drive changes in the gestural systems over generations, and which are hard to capture with a manual coding system focusing on the semiotic relation between gesture and meaning. All three of our kinematic measures show the hallmarks of increased communicative efficiency through reduced kinematic complexity over generations (Figure 7).
+  
+Figure 7. Change in kinematic properties over generations  
+```{r kinematicresults, message = FALSE, warning = FALSE, echo = FALSE,fig.align='center', fig.height=4, fig.width =5}
+#retrieve and plot kinematic properties over generations
+tstemp <- ts #copy temporary time series data
+tstemp$identifier <- paste0(tstemp$generation, tstemp$ppn, tstemp$chain, tstemp$object)  #make unique identifiers for each video
+seedsTS <- tstemp[tstemp$generation=="s",] #extract a separate seed time series
+
+#initialize variables to be collected, and data.frame to collect variables in
+chains <- generations <-objects <- vector()
+featsdata <- data.frame()
+for(ch in c("chain1", "chain2", "chain3", "chain4","chain5"))
+{ 
+  cc <- as.data.frame(tstemp[tstemp$chain == ch,]) #collect time series of chain 'ch'
+  for(id in unique(cc$identifier)) #go through all gestures in this chain and get relevant kinematic info
+  {
+  ccsub <- cc[cc$identifier==id,]
+  featsdata <- rbind.data.frame(featsdata, kin.get(ccsub)) #extract kinematic features for this gesture
+  objects <- c(objects, as.character(ccsub$object[1]))     #save object of depiction 
+  generations <- c(generations, ccsub$generation[1])    
+  chains <- c(chains,ch)
+  }
+  
+  #add for this the chain the relevant seed gesture information
+  seed_sub <- unique(cc$seedsetnum) #also collect for this chain the relevant seed videos used
+  #add seeds
+  for(seed_g in seed_sub)
+  {
+    ccsub <- seedsTS[seedsTS$seedsetnum==seed_g,]
+    featsdata <- rbind.data.frame(featsdata, kin.get(ccsub))
+    objects <- c(objects, as.character(ccsub$object[1]))
+    generations <- c(generations, 0)
+    chains <- c(chains, ch )
+  }
+}
+kin_data <- cbind.data.frame(featsdata, chains, objects,generations)
+
+
+ #smoothness (mixed regression modeling)
+  
+  kin_data$generations <- as.numeric(kin_data$generations)
+   basem1 <- lme(log(smoothness)~1, data = kin_data, random = ~1|chains/objects, method = "ML", na.action = na.exclude)
+   model1 <- lme(log(smoothness)~generations, data = kin_data, random = ~1|chains/objects, method = "ML", na.action = na.exclude)
+   sm_comp <- anova(basem1, model1)
+   sm_sum <- summary(model1)
+   sm_r <- r2beta(model1, method='sgv')
+   sm_D <-  lme.dscore(model1,kin_data, type = "nlme")
+
+  #rhythmicity (mixed regression modeling)
+   basem1 <- lme(rhythmicity~1, data = kin_data, random = ~1|chains/objects, method = "ML", na.action = na.exclude)
+   model1 <- lme(rhythmicity~generations, data = kin_data, random = ~1|chains/objects, method = "ML", na.action = na.exclude)
+   rh_comp <- anova(basem1, model1)
+   rh_sum <- summary(model1)
+   rh_r <- r2beta(model1, method='sgv')
+   rh_D <-  lme.dscore(model1,kin_data, type = "nlme")
+
+#average gesture space (mixed regression modeling)
+   basem1 <- lme(gspace~1, data = kin_data, random = ~1|chains/objects, method = "ML", na.action = na.exclude)
+   model1 <- lme(gspace~generations, data = kin_data, random = ~1|chains/objects, method = "ML", na.action = na.exclude)
+   gs_comp <- anova(basem1, model1)
+   gs_sum <- summary(model1)
+   gs_r <- r2beta(model1, method='sgv')
+   gs_D <-  lme.dscore(model1,kin_data, type = "nlme")
+
+#main plot
+library(ggbeeswarm)
+a <- ggplot(kin_data, aes(x= generations, y = log(smoothness), color = chains)) + geom_quasirandom(aes(group = generations),size=0.5, alpha= 0.75) + geom_smooth(method= "lm", alpha=0.1, size = 2) + theme_bw() + xlab("generation") + scale_color_brewer(palette = "Dark2")+ theme(legend.position = "none")+ylab("intermittency")+ggtitle("intermittency")+
+  scale_x_continuous(limits=c(0, 5)) 
+
+b <- ggplot(kin_data, aes(x= generations, y = rhythmicity, color = chains))+ geom_quasirandom(aes(group = generations),size=0.5, alpha= 0.75)+ geom_smooth(method= "lm", alpha=0.1, size = 2)+ theme_bw() + xlab("generation")+ylab("temporal var.") + ggtitle("temporal var.")+ theme(legend.position = "none")+ scale_color_brewer(palette = "Dark2")+
+   scale_x_continuous(limits=c(0, 5))
+
+c <- ggplot(kin_data, aes(x= generations, y = gspace, color = chains)) + geom_quasirandom(aes(group = generations),size=0.75, alpha= 0.5)+ geom_smooth(method= "lm", alpha=0.1, size= 2) + theme_bw() + xlab("generation") +ylab("gesture space")+ ggtitle("gesture space") + scale_color_brewer(palette = "Dark2")+ theme(legend.position = "none")+
+   scale_x_continuous(limits=c(0, 5))
+
+grid.arrange(c,a,b, nrow= 1)
+
+```
+*Note Figure 7*. \small Generation trends per chain for intermittency, temporal variability and gesture space. Over the generations, movements become more smooth (lower intermittency score), show more stable rhythms (lower temporal variability), and more minimized movements (smaller gesture space). There are fewer data points for temporal variability because this can only be computed for comparisons of gestures that have more than 2 submovements. So temporal variability indicates that *when there was a multi-segmented movement*, then such movements were more rhythmic.  \normalsize
+
+We performed mixed effects regression analysis for assessing potential kinematic changes as a function of generation, with random intercept for participants nested within chains (random slopes did not converge).  Generation reliably predicted intermittency of the movements relative to a base model, chi-squared change (1) = `r printnum( round(sm_comp$L.Ratio[2],3) )`, *p* `r printnum( ifelse(sm_comp$'p-value'[2] <.001, " <.001"  ,round(sm_comp$'p-value'[2],3) <.005) )`, model *R*-squared =  `r printnum( round(sm_r$Rsq[2],2))`. In this model generation predicted lower intermittency score, *b* estimate =  `r printnum( sm_sum$coefficients$fixed[2], digits =4 ) `, *t* (`r printnum( sm_sum$tTable[2,3])`) = `r printnum( round(sm_sum$tTable[2,4], 2))`, *p* `r printnum( ifelse(sm_sum$tTable[2,5]<.001 ," < .001", round(sm_sum$tTable[2,5], 4)))`, Cohen's *d* = `r printnum( round(sm_D$d[1], 2))`). 
+  We also observe lower temporal variability as a function of generations, chi-squared change (1) = `r printnum( round(rh_comp$L.Ratio[2],3))`, *p* `r printnum( ifelse(rh_comp$'p-value'[2] <.001, " <.001"  ,round(rh_comp$'p-value'[2],3) <.005))`, model *R*-squared =  `r printnum( round(rh_r$Rsq[2],2))`, indicating more stable rhythmic movements at later generations, *b* estimate =  `r printnum( rh_sum$coefficients$fixed[2], digits =4) `, *t* (`r printnum( rh_sum$tTable[2,3])` ) = `r printnum( round(rh_sum$tTable[2,4], 2) )`, *p* `r printnum( ifelse(rh_sum$tTable[2,5]<.001 ," < .001", round(rh_sum$tTable[2,5], 4) ))`, Cohen's *d* = `r printnum( round(rh_D$d[1], 2) )`)).  
+  Finally, over the generations gesture space decreased, chi-squared change (1) = `r printnum( round(gs_comp$L.Ratio[2],3))`, *p* `r printnum( ifelse(gs_comp$'p-value'[2] <.001, " <.001" ,round(gs_comp$'p-value'[2],3) <.005))`, model *R*-squared =  `r printnum(round(gs_r$Rsq[2],2))`. Model estimated gesture space was less for later generations, *b* estimate =  `r printnum( gs_sum$coefficients$fixed[2], digits =4) `, *t* ( `r printnum( gs_sum$tTable[2,3])`) = `r printnum(round(gs_sum$tTable[2,4], 2) )`, *p* `r printnum( ifelse(gs_sum$tTable[2,5]<.001 ," < .001", round(gs_sum$tTable[2,5], 4)))`, Cohen's *d* = `r printnum(round(gs_D$d[1], 2))`).  
+  Subtle changes in kinematic features are hard to capture using human coding, and indeed the rough proxies for this used by Motamedi and colleagues (2019) (length and number of repetitions of coded information units), did not demonstrate increased communicative efficiency. Here, we are able to capture increased efficiency by quantifying fine-grained kinematic features at the level of gesture tokens. Using independently motivated measures we found that gestures were on average smaller, less temporally variable, and less intermittent as the communicative system matured.  
+
+## Network changes over generations
+```{r network_evolution_main_findings, echo =FALSE, message = FALSE, warning = FALSE}
+#initialize variables we want to collect from the matrix data
+entropy1 <- chain <- generation <- kinch <- p <- 
+  submovements <- smoothness <- gspace <-   entropyWfunctions   <- entropyWthemes <- rhythmicity <- 
+  ann_entropy <- vector()
+for(ch in c("chain1", "chain2", "chain3", "chain4", "chain5"))
+{
+  for(gen in c(0:5))
+  {
+    #'participants' to loop through?
+    if(gen == 0)
+    {
+    participants <- ""
+    type = "0_"
+    }
+    if(gen != 0)
+    {
+    type = "1_"
+    participants <- as.character(unique(ts$ppn[ts$chain == ch & ts$generation == gen]))
+    }
+    #DO network property collection
+    for(ppn in participants) #loop through 'participants'
+    {
+    mat <- read.csv(paste0(matrices_data, type, ch, gen, ppn, ".csv"))      #fetch matrix
+    
+    #function/theme specific network properties to be collected
+    funtypes <-  unique(ts$functional) #collect functional categories from time series data
+    themtypes <-  unique(ts$theme)     #collect theme categories from time series data
+    entropyWfun  <-entropyWtheme  <- vector()  #make some variable to be renewed after each iteration in the 'participant' loop
+    
+    
+    theme_bindings <- unique(cbind(ts$object, ts$functional, ts$theme))
+    concepts <- colnames(mat)
+    entity <- themes <- vector(length = nrow(mat))
+    for(i in 1:length(concepts))
+    {
+      entity[i] <- theme_bindings[theme_bindings[,1]==concepts[i],2] 
+      themes[i] <- theme_bindings[theme_bindings[,1]==concepts[i],3] 
+    }
+
+    for(at in 1:4) #there are 4 themes and function types and we want to have specific network properties within each category
+    {
+      indexfun <- which(colnames(mat)%in%unique(ts$object[ts$functional==funtypes[at] ]) ) #collect indices in the matrix that match category
+      fun_mat     <- mat[indexfun,  indexfun] #make a function specific submatrix
+      indextheme <- which(colnames(mat)%in%unique(ts$object[ts$theme==themtypes[at] ]) ) #do the same for theme
+      them_mat     <- mat[indextheme, indextheme] 
+      
+    #within theme/function entropy/distance
+          #tempfunnet <- graph.adjacency(as.matrix(fun_mat), mode="undirected", weighted=TRUE, diag = FALSE)
+          entropyWfun <- c(entropyWfun, ent.N(fun_mat)) #mean(igraph::diversity(tempfunnet)))
+
+         #tempthemnet <- graph.adjacency(as.matrix(them_mat), mode="undirected", weighted=TRUE, diag = FALSE)
+         entropyWtheme <- c(entropyWtheme, ent.N(fun_mat)) #mean(igraph::diversity(tempthemnet)))
+     }
+    entropyWfunctions   <- c(entropyWfunctions, mean(entropyWfun))
+    entropyWthemes <- c(entropyWthemes, mean(entropyWtheme))
+    
+    #######################GLOBAL network properties to be collected
+    #compute entropy
+    entropy1 <- c(entropy1, ent.N(mat))
+    chain <- c(chain, ch)
+    generation <- c(generation, gen)
+    p <- c(p, ppn) #record participant number and save in variable p
+    
+    #ADD kinematic analysis to network property dataset, to be compared to network properties later
+    #get time series to regress for kinematic analysis
+    if(gen != 0) #compute kinematics
+    {
+    kinematics<- data.frame() 
+    kin <- ts[ts$ppn == ppn,]
+      for(o in unique(kin$object)) #collect for each object/video network properties and save them in kinematics
+      {
+      subkin <- kin[kin$object == o,]
+      kinematics <- rbind(kinematics, kin.get(subkin))
+      }
+    }
+    if(gen == 0) #also do this for seed level networks (which are chain specific)
+    {
+      kinematics<- data.frame()
+      kin <- subset(seeds, seedsetnum %in% ts$seedsetnum[ts$chain == ch])
+      for(o in unique(kin$object))
+      {
+      subkin <- kin[kin$object == o,]
+      kinematics <- rbind(kinematics, kin.get(subkin))
+      }
+      
+    }
+    #save network averaged kinematic info
+    submovements <- c(submovements, mean(kinematics[,1], na.rm=TRUE))
+    smoothness   <- c(smoothness, mean(kinematics[,2], na.rm=TRUE))
+    gspace       <- c(gspace, mean(kinematics[,3], na.rm=TRUE))
+    rhythmicity  <- c(rhythmicity, mean(kinematics[,4], na.rm = TRUE))
+      #add Motamedi human coded entropy values to be compared later to global network entropy
+    at <- unique(kin$ann_entropy)
+    at <- at[!is.na(at)]
+    ann_entropy <- c(ann_entropy, ifelse(!is.null(at), at, NA) )
+    }
+  }
+}
+#bind variables in one big data.frame 'ned'
+ned <- cbind.data.frame(chain, generation, entropy1, p, submovements, gspace, smoothness, rhythmicity,  entropyWthemes, entropyWfunctions, ann_entropy)
+```
+  While changes in kinematic complexity suggest an increase in efficiency, they do not by themselves provide evidence of systematicity, another hallmark feature of communicative systems. Here we assess whether the gesture network as a system shows reduced entropy over generations, which would mean that the interrelationships between gestures become less randomly distributed. Figure 8a shows that the entropy of gesture networks indeed decreased as a function of generation in 4 out of 5 chains, indicating lower complexity of gesture interrelations as the systems matured. This reduction in entropy, it turns out, scales very reliably with the discrete entropy derived from the manual coding (Fig 8b).
+  
+\pagebreak
+```{r plot_results_individual_networks, warning = FALSE, message = FALSE, results = 'hide',fig.show='hide'}
+#figure 8 plot code
+
+#main plot
+a <- ggplot(ned, aes(x= generation, y = entropy1, color = chain)) + geom_point(size = 3, alpha = 0.8) + facet_grid(.~chain) + geom_smooth(method= "lm", color = "black", alpha = 0.3) + theme_bw()+ ggtitle("entropy") + ylab("entropy")+ scale_color_brewer(palette="Set1")+ theme(strip.background =element_rect(fill="white"),legend.title = element_blank(), axis.title.x=element_blank())+ theme(legend.position = "none")
+
+#plot 5 networks with multidimensional scaling
+mat0 <-as.matrix(read.csv(paste0(matrices_data, "0_", "chain2", 0, ".csv")))
+mat1 <-as.matrix(read.csv(paste0(matrices_data, "1_", "chain2", 1, "full11.csv")))
+mat2 <-as.matrix(read.csv(paste0(matrices_data, "1_", "chain2", 2, "full13.csv")))
+mat3 <-as.matrix(read.csv(paste0(matrices_data, "1_", "chain2", 3, "full15.csv")))
+mat4 <- as.matrix(read.csv(paste0(matrices_data, "1_", "chain2", 4, "full17", ".csv")))
+mat5 <- as.matrix(read.csv(paste0(matrices_data, "1_", "chain2", 5, "full19", ".csv")))
+
+
+library(MASS)
+library(ggnetwork)
+library(network)
+library(sna)
+
+theme_bindings <- unique(cbind(ts$object, ts$functional, ts$theme))
+concepts <- colnames(mat1)
+entity <- themes <- vector(length = 24)
+for(i in 1:24)
+{
+  entity[i] <- theme_bindings[theme_bindings[,1]==concepts[i],2] 
+  themes[i] <- theme_bindings[theme_bindings[,1]==concepts[i],3] 
+}
+
+plot.networktsne <- function(matri, title)
+{
+
+
+  top <- tsne(as.dist(matri),  perplexity = 6) #isomap(as.dist(matri),k = 3, ndim=2)$points #tsne(as.dist(matri),  perplexity = 4, epoch=50) #
+  
+  
+  df <- cbind.data.frame(concepts, top, entity, themes)
+  colnames(df) <- c("concepts", "Xpos", "Ypos", "entity", "themes")
+  pl1 <- ggplot(df, aes(x= Xpos, y = Ypos,xend = 0, yend = 0, color = entity)) + geom_point(aes(shape = entity), size= 2)+ stat_ellipse(type = "t", level =0.60) +  theme(legend.position = "none") + theme_void() + ggtitle(title) +theme(legend.position = "none")
+    pl2 <- ggplot(df, aes(x= Xpos, y = Ypos,xend = 0, yend = 0, color = themes)) + geom_point(aes(shape = themes), size= 2)+ stat_ellipse(type = "t", level =0.60) +  theme(legend.position = "none") + theme_void() + ggtitle(title) +theme(legend.position = "none")
+
+  return(grid.arrange(pl1, pl2))
+}
+
+  #l2 <- layout_with_mds(g_s2, dist =mat2 ) #multidimensional scaling (so that layout reflects distance)
+   l0 <- plot.networktsne(mat0, "generation 0")
+   l1 <- plot.networktsne(mat1, "generation 1")
+   l2 <- plot.networktsne(mat2, "generation 2")
+   l3 <- plot.networktsne(mat3, "generation 3")
+   l4 <- plot.networktsne(mat4, "generation 4")
+   l5 <- plot.networktsne(mat5, "generation 5")
+
+  one <- grid.arrange(l0,l1, l2,l3,l4, l5, ncol = 6)
+
+  
+#check & plot correlation entropy
+ci <- cor.test(ned$ann_entropy[ned$generation!=0], ned$entropy1[ned$generation!=0])
+cit <- paste0("r = ", round(ci$estimate, 2),  ", p = ", ifelse(ci$p.value < .001, "< .001", round(ci$p.value, 3)))
+
+d <- ggplot(ned[ned$generation!=0,], aes(x = ann_entropy, y = entropy1, color = chain)) + geom_point(size = 1.5) + geom_smooth(method = "lm", color = "black", alpha = 0.2) + 
+  ylab("kinematic network entropy") + xlab("discrete entropy \n (based on human coding)" ) + theme_bw() +scale_colour_brewer(palette = "Set1")+
+   annotate("text", label= cit, x=5.6, y=0.998, size = 5, color = "black")
+
+
+```
+Figure 8. Changes in networks measures over generations within chains 
+```{r plotresults, echo = FALSE, fig.align= 'center', fig.height=7, fig.width=5}
+#corsentrop <- grid.arrange(a, d, nrow = 1)
+#grid.arrange(corsentrop, one)
+
+#load in the finally edited time series example
+mypng <- stack(paste0(plotfolder, "/ModifiedPlots/FigureEntropyScalingNetworks.png"))
+plotRGB(mypng,maxpixels=1e500000)
+
+```
+ *Note Figure 8.* \small Panel 'a' shows for each chain the changes over generations in entropy, with generation 0 indicating the seed gesture set. For each generation > 0 there are two data points as there are two participants in each generation. Entropy tends to decline over the generations, indicating that relationships between tokens became less diverse, possibly indicating systematicity in the way nodes are connected. Panel 'b' shows that the network entropy computed on the kinematic distances was scaled reliably scaling with the discrete entropy computed on human annotated data, which suggests that our kinematic derived measure captures a comparable phenomenon in the evolution of gesture. In panel 'c' we provide the 2D network representations for each generation in chain 2, color coded and ellipses drawn for theme and function categories for separate rows. We arbitrarily picked one participant for each chain iteration. Note, it is difficult to directly see changes in structure in these representations which can be directly related to reduction in entropy, but in general the distances are less diverse over the generations.\normalsize
+
+```{r test differences, echo = FALSE, message = FALSE, warning = FALSE}
+   basem1 <- lme(entropy1~1, data = ned, random = ~1|chain, method = "ML", na.action = na.exclude)
+   model1 <- lme(entropy1~generation, data = ned, random = ~1|chain, method = "ML", na.action = na.exclude)
+   h0Entr <- anova(basem1, model1)
+   h0EntrP <- summary(model1)
+   h0EntrR <- r2beta(model1, method='sgv')
+   h0EntrD <- lme.dscore(model1,ned, type = "nlme")
+```
+  
+  We tested the trend indicated in Figure 8a in a mixed effects regression model similar to the original study [@motamediEvolvingArtificialSign2019], with chain as random intercept (random slopes did not converge for these models) and generation as independent predictor (0-5 generations, with generation 0 being the seed gesture network). Generation was indeed a reliable predictor for network entropy as compared to a base model predicting the overall mean, chi-squared change (1) = `r printnum(round(h0Entr$L.Ratio[2],3))`, *p* = `r printnum( round(h0Entr$'p-value'[2],3))`, model *R*-squared =  `r printnum( round(h0EntrR$Rsq[2],2))`. Model estimates showed that entropy decreased over generation, *b* estimate =  `r printnum( h0EntrP$coefficients$fixed[2], digits =4 ) `, *t* (`r printnum( h0EntrP$tTable[2,3] )`) = `r printnum(round(h0EntrP$tTable[2,4], 2))`, *p* = `r printnum(round(h0EntrP$tTable[2,5], 3))`, Cohen's *d* = `r printnum( round(h0EntrD$d, 3))`).  
+  In sum, we find that kinematic network entropy decreases over generations, suggesting a steady increase in systematicity in terms of the distance between gestures in gesture networks. Furthermore, there is a clear scaling relation between the gesture-content entropy computed on human categorical codings and our measure of kinematic entropy, suggesting we are capturing a similar systematic property of these evolving manual languages. 
+
+## Relations between Kinematic and network properties
+  So far we have shown an overall increase in communicative efficiency (as measured by change in kinematic features over generations) and an increase in systematicy (as measured in decreasing entropy over generations). Reduction in kinematic features may or may not be related to the systematicity found in each gesture chain. Figure 9 shows how each kinematic property (averaged by participant) relates to gesture network entropy. We see that network entropy reduces as the average gesture space decreases and movements become less intermittent.  
+
+\pagebreak
+Figure 9. Relation between kinematic properties and network measures
+```{r test_network_kinematics, echo = FALSE, message = FALSE, fig.width = 6, warning = FALSE}
+sizetext <-  3
+#individual level
+sh <- cor.test(log(ned$smoothness), ned$entropy1)
+sht <- paste0("r = ", round(sh$estimate, 2),  ", p = ", ifelse(sh$p.value < .001, "< .001", round(sh$p.value, 3)))
+a <- ggplot(ned, aes(x = log(smoothness), y=entropy1)) + geom_point() + geom_smooth(method = "lm", color = "indianred1")+ theme_bw()+ggtitle("intermittency")+xlab("intermittency")+ylab("entropy")+
+   annotate("text", label= sht, x=7, y=1.0, size = sizetext)+scale_x_reverse()
+
+rh <- cor.test(ned$rhythmicity, ned$entropy1)
+rht <- paste0("r = ", round(rh$estimate, 2),  ", p = ", ifelse(rh$p.value < .001, "< .001", round(rh$p.value, 3)))
+b <- ggplot(ned, aes(x = rhythmicity, y=entropy1)) + geom_point() + geom_smooth(method = "lm", color= "black") + theme_bw()+ ggtitle("temporal var.")+xlab("temporal var.") +ylab("entropy")+
+   annotate("text", label= rht, x=0.75, y=1.0, size = sizetext)+scale_x_reverse()
+
+gh <- cor.test(ned$gspace, ned$entropy1)
+ght <- paste0("r = ", round(gh$estimate, 2),  ", p = ", ifelse(gh$p.value < .001, "< .001", round(gh$p.value, 3)))
+c <- ggplot(ned, aes(x = gspace, y=entropy1)) + geom_point() + geom_smooth(method = "lm", color ="orange")+ theme_bw()+ggtitle("gesture space")+xlab("gesture space")+ylab("entropy")+
+   annotate("text", label= ght, x=115, y=1.0, size = sizetext)+scale_x_reverse()
+
+grid.arrange(c,a,b,nrow = 1)
+```
+*Note Figure 9*. \small Correlations are shown for each kinematic property averaged over all tokens for that participant and the concomitant network entropy for that participant. Note that the x-axis is reversed such that reductions in kinematic complexity are related to entropy. It can be seen that less intermittency and smaller gesture spaces, relate to lower entropy. This indicates that especially reduction in intermittency and gesture space is related with emergence of systematicity on the network level. \normalsize
+
+## Chain-unique kinematic evolution over the generations
+  We have obtained evidence that over generations, kinematic changes go hand-in-hand with a decrease in complexity, and kinematic interrelationships between gestures indicate increasing systematicity. In our final analysis, we use our fine-grained token-level kinematic measures to assess whether unique trajectories in language evolution can be observed. The kinematic changes we have detected could suggest that motoric constraints lead iconic gesture systems to become more similar to each other, rather than as unique language-like systems. To test whether this is the case, we analyze whether the kinematic interrelationships within a chain diverge from other chains across the study. We predict that even though chains converge in the degree of systematicity (as we found above), they may actually diverge from each other over generations, as conventions are built that are unique to each chain. Figure 10 shows the main results of this research question.     
+ 
+Figure 10. Evolution of kinematic interrelationships between and within chains over the generations  
+```{r, echo = FALSE, message = FALSE, warning = FALSE, cache = TRUE, fig.height=7, fig.width=7}
+
+#collect the distance matrices on the level of the generations
+D1 <-read.csv(paste0(matrices_data, "C_1.csv"), header= FALSE)
+D2 <-read.csv(paste0(matrices_data, "C_2.csv"), header= FALSE)
+D3 <-read.csv(paste0(matrices_data, "C_3.csv"), header= FALSE)
+D4 <- read.csv(paste0(matrices_data, "C_4.csv"), header= FALSE)
+D5 <- read.csv(paste0(matrices_data, "C_5.csv"), header= FALSE)
+
+#this function is repeated to plot 
+plot.networktsne <- function(D, gg)
+{
+  matri <- as.matrix(D[2:nrow(D), 2:ncol(D)])
+  top <- tsne(as.dist(matri),  perplexity = 25, max_iter=1000)# 25 = good 
+  chains <- as.vector(t(D[1,2:ncol(D)]))
+  concepts <-  as.vector(D[2:nrow(D),1])
+  df <- cbind.data.frame(top, concepts, chains)
+  colnames(df) <- c( "Xpos", "Ypos","concepts", "chains")
+  pl <<- ggplot(df, aes(x= Xpos, y = Ypos,xend = 0, yend = 0, color =chains)) + geom_point(size= 2, alpha = 0.75) +  theme_void() + scale_color_brewer(palette = "Set1")+ stat_ellipse(type = "t", level = 0.50) + theme(legend.position = "none") + ggtitle(paste0("gen: ",  gg)) + xlim(-20, 20)
+}
+
+#perform function for each generation
+   l1 <- plot.networktsne(D1, 1)
+   l2 <- plot.networktsne(D2, 2)
+   l3 <- plot.networktsne(D3, 3)
+   l4 <- plot.networktsne(D4, 4)
+   l5 <- plot.networktsne(D5, 5)
+
+#cluster performance per chain
+dunn_index <- silwidth <- gener <- vector()
+longsils <- data.frame()
+for(gen in 1:5)
+{
+  #get the distance matrix for that generation
+  dat <- read.csv(paste0(matrices_data, "C_", gen,".csv"), header= FALSE)
+    matri <- as.matrix(dat[2:nrow(dat), 2:ncol(dat)]) #ignore first row/column with chain info values
+  clusters <-  as.numeric(as.factor(as.vector(t(dat[1,2:ncol(dat)])))) #get chan info first row/column
+  dunn_index <- c(dunn_index, dunn(as.dist(matri), clusters)) #compute the dunn index for chain
+  gener <- c(gener, gen) #save the info for this generation
+  
+  #Sillwidht widths which is a long format dataset
+  scores <- silhouette(clusters, as.dist(matri))[,1:3] #get sillhoette score
+  generation <- rep(gen, nrow(scores)) #create equal length vector with generation info
+  batchsil <- cbind.data.frame(scores, generation) #add it to the longdata
+  longsils <- rbind.data.frame(longsils, batchsil) #add it to the final dataset with all info
+}
+cls <- cbind.data.frame(dunn_index, gener)
+
+#plot dunn index
+a <- ggplot(cls, aes(x=gener, y=dunn_index)) + geom_point(size =3) + geom_smooth(method="lm", alpha =0, color = "black", linetype = "dashed") + theme_bw() + ylab("dunn index") + ylim(0.025, 0.09) + xlab("generation")
+
+#plot sil width
+gh <- cor.test(longsils$generation, longsils$sil_width)
+ght <- paste0("r = ", round(gh$estimate, 2),  "\n, p = ", ifelse(gh$p.value < .001, "< .001", round(gh$p.value, 3)))
+
+longsils$chain <- as.factor(longsils$cluster)
+b <- ggplot(longsils, aes(x=generation, y=sil_width, color = chain)) + geom_quasirandom(size =1) + geom_smooth(method="loess", alpha =0) + geom_smooth(method="lm", color = "black") + theme_bw()+ scale_color_brewer(palette = "Set1") + annotate("text", label= ght, x=2.5, y=0.35, size = 3) + ylab("sillouhette width")
+
+#plot networks, dunn and sil width in one single graph
+networkplots <- grid.arrange( l1,  l2,  l3,  l4,  l5,  nrow =5)
+cluster <- grid.arrange(a, b, nrow =2)
+grid.arrange(networkplots, cluster, nrow=1)
+
+```
+*Note Figure 10.* (A) Network representations of kinematic interrelationships colour-coded by chain and with ellipses showing cluster centroids in similarity space. In generation 1, nodes are scattered and centroids mostly overlap, suggesting gestures do not clearly pattern by chain yet. Over generations, gestures increasingly cluster by chain, and chains drift apart, as seen in the decreasing centroid overlap in generations 3-5. Right panel: For gestures grouped by chains, the Dunn index shows an increase in cluster compactness and distinctiveness over generations (B), and Silhouette width reveals at the level of single gestures how the mean distance to tokens from other chains reliably grows relative to the mean distance to tokens from the same chain (C). This is for example apparent when contrasting chain 5 at generation 2 versus that same chain at generation 4, showing higher silhouette scores at generation 4 and more compact clustering in (A).
+
+
+ The network representations at each generation show that early on, gestures do not cluster clearly by chain. However, over generations, especially in generation 3 to 5, we see that gestures from particular chains start to cluster together more prominently, and clusters move away from each other to some extent, indicating greater chain-internal similarity and growing differences across chains (Figure 10A).     
+  Clustering can be quantified in several ways. Here we provide two well-known cluster performances measures: the Dunn index and the Silhouette width [@yadavClusteringLungCancer2013]. In general, cluster performance measures relate the within-cluster distances between nodes (which is minimal when clusters are stable), to between-cluster distances (which is maximal when clusters are stable), though they vary in how they compute the within and between distances. The Dunn index quantifies the compactness of the clusters assigned (chains in our case) and relates the minimum distance between centroids of each cluster to maximal distance between points, where higher values indicate better clustering.This measure shows a clear increase in chain-clustering performance over generations (Figure 10B). However, this measure only yields 5 data points in our case, one for each chain, which makes it hard to perform a statistical test. Therefore we also computed a token level measure of Silhouette width, which, for each token, relates the mean distance to other tokens within its cluster to the minimum distance between a member of a neighboring cluster. We find that, over generations, Silhouette width increases reliably, *r* = 0.1, *p* < 0.001 (Figure 10C).  
+  In sum, we find that each chain creatively shapes their own gesture system. While our network analysis showed that gesture systems become internally more coherent for all chains, this does not mean that chains become similar to each other. Instead, they forge their own developmental trajectory through over generations.  
+
+\pagebreak
+# Discussion
+  Based on signal processing alone we have detected systematic changes reflective of a linguistically maturing communication system, from continuous multi-articulatory kinematics of silent gestures. We applied computer vision techniques to extract kinematics from video data [e.g.,@ostlingVisualIconicitySign2018; @ripperdaSpeedingDetectionNoniconic2020; @trettenbreinControllingVideoStimuli2021]. We then quantified kinematic relationships between gestural utterances [@pouwGestureNetworksIntroducing2019]. Our analysis showed that a coding system focusing primarily on the hands would miss important gestural content that can be observed from head movements. We found that including head motion data as opposed to only motion data from the hands allowed us to better distinguish randomly paired gestures from directly related.  In line with earlier research suggesting that communicative systems tend towards communicative efficiency [@gibsonHowEfficiencyShapes2019; @namboodiripadMeasuringConventionalizationManual2016]), and going beyond the original study findings, we obtain that gestures reduce their complexity over the generations, by reducing size, submovements, and becoming more rhythmic. Communicative efficiency does not automatically entail systematicity. Therefore, we analyzed gesture networks and showed that communicative tokens have higher systematicity, a finding that is in line with measures derived from manual coding. These results suggest that form analysis can provide information about systematicity, making our method a valuable addition to the toolkit of gesture analysis (where it complements human coding of gesture content) and the cultural evolution of signaling systems more generally and without resorting to categorical semantic coding.  
+  The equivalence of form-based kinematic analysis and content-based manual coding is as much a theoretical advancement as it is a methodological one. It means that aspects of form can directly embody some of the systematic structure inherent in a system  [@raczaszek-leonardiReconcilingSymbolicDynamic2008]. This is underlined by our final, novel analysis, in which we found that while chains show a decrease in systematicity, the gestures that are produced become more distinct with respect to the other chains. Gestures within chains became clearly more clustered over time, meaning their form became more alike within the chain at later generations, and more dissimilar from other chains. This is clear evidence of a drift towards chain-specific conventions, suggesting the emergence of gesture kinematic dialects.
+  In sum, the current analysis provides new insights in how gesture movements linguistically evolve. First, increased communicative efficiency was previously judged absent on the basis of gestural unit length, but we show it is present in the kinematics on relevant dimensions as salience, segmentation, and temporality. Second, kinematic properties change coherently to simplify in structure, which it turns out, is relatable to the simplification of the semantic content of gestures; a non-trivial equivalence given the fact that form and content are generally forcefully distinguished. Finally, we obtain that kinematic dialects emerge, which goes beyond the goals of the original study altogether.
+  
+## Shortcomings and advantages 
+  There are two important caveats to the analyses presented here. First, the kinematic analysis cannot say anything precise enough to determine the semiotic content of tokens [cf. @pouwSemanticallyRelatedGestures2021]. Therefore, understanding the semiotic content of human communication will always require extensive human analysis [@sandlerBodyEvidenceNature2018]. While understanding the semiotic content requires human analysis, kinematic analysis provide us with a unique grasp of aspects of rich evolving communicative systems that may elude human coders or would be too resource-demanding to manually code. The most productive way forward therefore is to use methodological triangulation by combining kinematic measures and semiotic analyses. For instance, kinematic measures would allow the detection of subtle changes in gesture form or system-level structure not possible through semantic analysis alone. This analysis can then be subjected to linguistic analysis or human coding to understand semiotic and structural aspects of the evolving system. For example, we find that the inclusion of head movements meaningfully improves our kinematic measures. While the original experiment focused on the hands as the most important articulators (Motamedi et al., 2019), our finding invites consideration of how head movements may be recruited as part of a culturally evolving semiotic system, a finding that has implications beyond purely methodological concerns. The general picture that emerges is that kinematic measures allow a bottom-up, data-driven approach to be informed and enriched by semiotic analysis at particularly quantitatively “active regions” of the data.         
+  A second caveat concerns a limitation to dynamic time warping. One finding from prior work on the evolution of compositionality is that holistic gestures may become segmented, freeing up individual elements to be recombined, possible in different orders. Now consider two gestures that contain identical segments in different orders. While human coders would likely recognize the commonality and judge these as highly similar, the dynamic time warping algorithm is sensitive to ordering and would judge them as very different. So our dynamic time warping analysis may at times judge sequences of gestures highly dissimilar when in fact they are merely ordered differently. There are ways to circumvent this by only looking for trajectory overlaps rather than ordering through time  [@pouwGestureNetworksIntroducing2019]but such analyses goes beyond the current approach. Importantly, this limitation stacks the deck against finding increases in systematicity, so it speaks to the robustness of our measures (and perhaps indicates the limited occurrence of reordering elements) that some degree of systematicity is nonetheless recovered.  
+  Both of these caveats mean that our approach to kinematics, like all quantitative analyses of human behavior, requires some degree of human oversight (for meaningful implementation) and human insight (for judicious interpretation). When these requirements are met, we believe that our fully reproducible and automatable methods can make important contributions to the systematic study of continuous communicative signals.  
+
+## Embodied language evolution
+  In our view the current findings underline an understanding of language evolution as an embodied process. Consider for example our finding that manual utterances simplify, in the way of reducing in size [see also @namboodiripadMeasuringConventionalizationManual2016], in the reduction of submovements, and the decrease in temporal variability of the utterance if it comprised of multiple submovements. This simplification seems to be a reduction in articulatory effort. Making a smoother, smaller, and more rhythmic movements reduces the states that a sensorimotor routine needs to visit [@kelsoFunctionallySpecificArticulatory1984]. Thus communicative efficiency increased over the generations at the motoric level, an effect not captured by the content-level repetition and gesture length measure used in the original study (Motamedi et al., 2019). Note that kinematic efficiency could also potentially increase learnability and comprehensibility of the gestures. Speech perception in noisy conditions is more optimal when speech is more rhythmic. Speech perception in noisy conditions is more optimal when speech is more rhythmic [@wangSpeakingRhythmicallyImproves2018]. We submit that the optimization of sensorimotor routines of communication is an integral part of the increased efficiency of communication. This is fully in line with early insights on the psychobiology of language by Zipf or Macneilage [@zipfPsychobiologyLanguage1935; @macneilageOriginSpeech2010], which have been overshadowed to some extent by the focus on codes and information content in the wake of Shannon. Our measures show how it is possible to unite fine-grained measures of the biomechanics of evolving continuous signals with information-theoretic notions of like system-level entropy. Low-level biomechanical optimization and code-level systematic optimization should not be treated as categorically distinct processes.        
+  We find a similar reduction of complexity of pronunciation as in novice learners of ASL. ASL learners spatially reduce their signs as they become more fluent [@wilburExperimentalInvestigationStressed1990; @luptonMotorLearningSign1990]. Compound signs also become shorter as multi-component signs merge into efficiently produced single signs, in a way that is mirrored in the data we have analyzed here. As sign systems evolve, suboptimal organizations of submovements give way to more efficient signs, and temporally extended sequences become more coordinated   [@bernsteinCoordinationRegulationsMovements1967; @kelsoDynamicPatternPerspective1983]. This makes the dynamics of the evolving gesture systems we have studied here similar in some ways to those of full-blown manual language systems, such as ASL.    
+  Another sign of the maturity of the culturally evolved gestural systems we have studied here is the fact that head movements can function as cues reliably distinguishing paired gestures. This finding resonates with the known grammatic, phonetic, and prosodic functions that head movements have in sign languages such as ASL [@tyronePhoneticsHeadBody2016]. Indeed, as @sandlerBodyEvidenceNature2018 has argued for sign languages, the expressive power of the body lies in the combination of different articulators, combined into a single synergetic utterance.  
+  
+## Future directions
+
+ While we have focused on silent gesture as a test case here, our analyses are applicable to any continuous signaling system. Similar approaches are applied in animal signaling systems, where high dimensional features of tokens are mapped onto lower dimensional space so to identify stably distinct patterns  [@sainburgLatentSpaceVisualization2019]. Staying within the domain of human communication, the current analysis could be applied to speech acoustics, semantics and gesture kinematics in unison [@pouwGestureNetworksIntroducing2019; @pouwSemanticallyRelatedGestures2021]. Indeed, in a study by @perlmanIconicityCanGround2015 it is shown how dynamic aspects of vocalization signaling systems become more efficient, similar to our current reduction in kinematic complexity. These findings, together with work showing the tight connection between speech and gesture  [@boskerBeatGesturesInfluence2020; @pouwEnergyFlowsGesturespeech2020; @pouwGesturespeechPhysicsFluent2020], make it a natural next step to look at multimodal iterated learning experiments. Furthermore, our approach can inform work on communicative alignment in conversation [@rasenbergAlignmentMultimodalInteraction2020] or the ways in which people can repeat aspects of each other’s communicative behavior. In short, our analysis here has not only yielded new findings in the cultural evolution of gestural communication systems, but opens the door towards a broader research program in which the biomechanical aspects of communication systems are studied alongside their structural and semiotic aspects. 
+ 
+## Conclusion
+   Human communicative behavior tends to combine categorical elements and continuous properties, but for technological as well as theoretical reasons the categorical elements of evolving linguistic systems have long received more attention than their continuous aspects. Here we have contributed to the study of multimodal language and cognition by considering the gesture kinematics of evolving gestural systems. We have used computer vision techniques to analyze the kinematic properties of evolving gestural systems, showing that over generations of learners, the dynamics of head and upper limb movements become simpler, increase in systematicity, and give rise to kinematic dialects.  Our kinematic measures help characterize fine-grained levels of linguistic organization that remain out of reach of content-based discretized coding approaches, providing novel insights that corroborate and complement prior approaches. Our findings providing an unprecedented view of how gestures become structured and increasingly language-like as they evolve, in ways that are directly related to the coordination and simplification of bodily movements. While considerations of communicative efficiency and systematicity have so far been mostly based on analyses of discrete symbol systems like written words and text corpora, our work shows how hallmark features of linguistic systems may be grounded directly in the biomechanical properties of dynamically evolving systems of continuous signals. 
+
+# References
+```{r create_r-references}
+r_refs(file = "r-references.bib")
+```
+<div id = "refs"></div>
+
+# Supplemental
+
+Figure S1. Correlations and distributions for kinematic measures per trial
+```{r summ_kin, echo = FALSE, message = FALSE, warning = FALSE, fig.height =6, fig.width = 6}
+#AUTO MEASURES CORRELATIONS
+ca <- cor.test(feats$submovements, feats$smoothness)
+cat <- paste0("r = ", round(ca$estimate, 2),  ", p = ", ifelse(ca$p.value < .001, "< .001", round(ca$p.value, 3)))
+a <- ggplot( feats, aes(x = submovements, y = smoothness)) + geom_point(size = 0.1) + geom_smooth(color = "orange") + theme_bw()+xlab("log submovements" )+ ylab("log intermittency") +
+      annotate("text", label= cat, x=1.5, y=13)
+
+
+#correlations and plots
+cb <- cor.test(feats$smoothness, feats$rhythmicity)
+cbt <- paste0("r = ", round(cb$estimate, 2),  ", p = ", ifelse(cb$p.value < .001, "< .001", round(cb$p.value, 3)))
+b <- ggplot( feats, aes(x = smoothness, y = rhythmicity)) + geom_point(size = 0.1) + geom_smooth(color = "orange") + theme_bw()+xlim(4, 12) + xlab("log intermittency") +ylab("temporal variability")+
+   annotate("text", label= cbt, x=6.5, y=4.75)
+
+cc <- cor.test(feats$smoothness, feats$gspace)
+cct <- paste0("r = ", round(cc$estimate, 2),  ", p = ", ifelse(cc$p.value < .001, "< .001", round(cc$p.value, 3)))
+
+c <- ggplot( feats, aes(x = smoothness, y = gspace)) + geom_point(size = 0.1) + geom_smooth(color = "orange") + 
+  theme_bw() + xlab("log intermittency") + 
+     annotate("text", label= cct, x=2.5, y=200)
+
+cd <- cor.test(feats$rhythmicity, feats$gspace)
+cdt <- paste0("r = ", round(cd$estimate, 2),  ", p = ", ifelse(cd$p.value < .001, "< .001", round(cd$p.value, 3)))
+d <- ggplot( feats, aes(x = rhythmicity, y = gspace)) + geom_point(size = 0.1) + geom_smooth(color = "orange") + 
+  theme_bw() +xlab("temporal variability")+
+       annotate("text", label= cdt, x=2.75, y=4.75)
+
+grid.arrange(ggMarginal(a),ggMarginal(b),ggMarginal(c), ggMarginal(d), nrow= 2)
+
+```
+*Note Figure S1*. Left upper panel, correlations and distributions are shown for intermittency and submovement. Given their high correlation we will use intermittency score for our final analysis. Other correlations are shown for the selected measures, rhythmiticy, gesture space and intermittency.  
+
+Figure S2. Correlations of kinematic measures with human-coded gesture information  
+```{r r summ_kin2, echo = FALSE, message = FALSE, warning = FALSE, , fig.height =7, fig.width = 6}
+
+#AUTO MEASURES CORRELATIONS with Human Annotations
+sizetext <- 3
+tcol <- "red"
+  #segments vs. smoothness
+ca <- cor.test(feats$segments, feats$smoothness)
+cat <- paste0("r = ", round(ca$estimate, 2),  ", p = ", ifelse(ca$p.value < .001, "< .001", round(ca$p.value, 3)))
+a <- ggplot( feats, aes(x = segments, y = smoothness)) + geom_point(size = 0.1) + geom_smooth(color = "red") + theme_bw()+xlab("segments \n (human coder)")+ ylab("intermittency") +
+      annotate("text", label= cat, x=8, y=13, size = sizetext, color = tcol)
+
+  #information units vs smoothness
+cb <- cor.test(feats$inf_units, feats$smoothness)
+cbt <- paste0("r = ", round(cb$estimate, 2),  ", p = ", ifelse(cb$p.value < .001, "< .001", round(cb$p.value, 3)))
+b <- ggplot( feats, aes(x = inf_units, y = smoothness)) + geom_point(size = 0.1) + geom_smooth(method = "lm", color = "red") + theme_bw()+xlim(4, 12) + xlab("information units \n (human coder)") +ylab("intermittency")+
+   annotate("text", label= cbt, x=7, y=13, size = sizetext, color = tcol)
+
+  #repetitions vs. smoothness
+cc <- cor.test(feats$repetitions, feats$smoothness)
+cct <- paste0("r = ", round(cc$estimate, 2),  ", p = ", ifelse(cc$p.value < .001, "< .001", round(cc$p.value, 3)))
+c <- ggplot( feats, aes(x = repetitions, y = smoothness)) + geom_point(size = 0.1) + geom_smooth(method = "lm",color = "red") + 
+  theme_bw() + xlab("repetitions \n (human coder)") + ylab("intermittency")+
+     annotate("text", label= cct, x=4, y=11.5, size = sizetext, color = tcol)
+
+  #segments vs. gspace
+cd <- cor.test(feats$segments, feats$gspace)
+cdt <- paste0("r = ", round(cd$estimate, 2),  ", p = ", ifelse(cd$p.value < .001, "< .001", round(cd$p.value, 3)))
+d <- ggplot( feats, aes(x = segments, y = gspace)) + geom_point(size = 0.1) + geom_smooth(method = "lm", color = "red") + theme_bw()+xlab("segments \n (human coder)" )+ ylab("gesture space") +
+      annotate("text", label= cdt, x=8, y=13, size = sizetext, color = tcol)
+
+  #information units vs. gspace
+ce <- cor.test(feats$inf_units, feats$gspace)
+cet <- paste0("r = ", round(ce$estimate, 2),  ", p = ", ifelse(cd$p.value < .001, "< .001", round(cd$p.value, 3)))
+e <- ggplot( feats, aes(x = inf_units, y = gspace)) + geom_point(size = 0.1) + geom_smooth(method = "lm", color = "red") + theme_bw()+xlim(4, 12) + xlab("information units \n (human coder)") +ylab("gesture space")+
+   annotate("text", label= cet, x=7, y=4.75, size = sizetext, color = tcol)
+
+  #repetitions vs. gspace
+cf <- cor.test(feats$repetitions, feats$gspace)
+cft <- paste0("r = ", round(cf$estimate, 2),  ", p = ", ifelse(cf$p.value < .001, "< .001", round(cf$p.value, 3)))
+f <- ggplot( feats, aes(x = repetitions, y = gspace)) + geom_point(size = 0.1) + geom_smooth(method = "lm", color = "red") + theme_bw() + xlab("repetitions \n (human coder))") +ylab("gesture space")+
+   annotate("text", label= cft, x=4, y=4.75, size = sizetext, color = tcol)
+
+  #segments vs. rhythmicity
+cg <- cor.test(feats$segments, feats$rhythmicity)
+cgt <- paste0("r = ", round(cg$estimate, 2),  ", p = ", ifelse(cg$p.value < .001, "< .001", round(cg$p.value, 3)))
+g <- ggplot( feats, aes(x = segments, y = rhythmicity)) + geom_point(size = 0.1) + geom_smooth(method = "lm", color = "red") + theme_bw()+xlab("segments \n (human coder)" )+ ylab("temporal  var.") +
+      annotate("text", label= cgt, x=8, y=4.75, size = sizetext, color = tcol)
+
+  #information units vs. rhythmicity
+ch <- cor.test(feats$inf_units, feats$rhythmicity)
+cht <- paste0("r = ", round(ch$estimate, 2),  ", p = ", ifelse(ch$p.value < .001, "< .001", round(ch$p.value, 3)))
+h <- ggplot( feats, aes(x = inf_units, y = rhythmicity)) + geom_point(size = 0.1) + geom_smooth(method = "lm", color = "red") + theme_bw()+xlim(4, 12) + xlab("information units \n (human coder)") +ylab("temporal  var.")+
+   annotate("text", label= cht, x=7, y=4.75, size = sizetext, color = tcol)
+
+  #repetitions vs. rhythmicity
+ci <- cor.test(feats$repetitions, feats$rhythmicity)
+cit <- paste0("r = ", round(ci$estimate, 2),  ", p = ", ifelse(ci$p.value < .001, "< .001", round(ci$p.value, 3)))
+i <- ggplot( feats, aes(x = repetitions, y = rhythmicity)) + geom_point(size = 0.1) + geom_smooth(method = "lm", color = "red") + theme_bw() + xlab("repetitions \n (human coder)") +ylab("temporal  var.")+
+   annotate("text", label= cit, x=4, y=4.75, size = sizetext, color = tcol)
+
+grid.arrange(a,b,c,
+             d,e,f,
+             g,h,i,nrow= 3)
+
+
+
+```
+*Note figure S2.* On the horizontal axes the human-coded number of gesture segments, unique information units, and the number repetitions (of information units) are shown. On the vertical axes our automatic kinematic measures are shown: intermittency, gesture space, and temporal variability. The findings show that our measures are a proxy for human judgments, such that more intermittent kinematics reflect more information units (repeater and/or unique). Larger gesture space is related to more information units. Lower temporal variability in kinematics is further associated with more information units.
+
+
+
+
+
+\endgroup
