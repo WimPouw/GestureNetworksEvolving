@@ -75,6 +75,7 @@ library(stringr)          #string manipulation
 library(parallelsugar)    #for parallel computing
 library(clValid)      #clustering
 library(MASS)         #clustering
+library(parallel)     #for detectCores() function
 ```
 
 ```{r analysis-preferences}
@@ -346,9 +347,12 @@ Importantly, the prediction that gestures simplify is based on previous research
 
 We will follow a bottom-up approach to the study of kinematics as communicative systems. In the first stage of our analysis, we demonstrate the specific changes that occur in the kinematics of the gestures. In a second stage, we assess possible systematic interrelationships in kinematic patterns of gestures through gesture network analysis [@pouwGestureNetworksIntroducing2019]. We will discuss each step in this procedure in the following sections, and finally discuss our main gesture network entropy measure. In the supplemental information we reserve extra space for sanity checks of automated processing and graphical descriptive results of the key measures.  
 
-```{r construct_matrices_and_save, results = 'hide', cache= TRUE, eval = FALSE}
+```{r construct_matrices_and_save, results = 'hide', cache= TRUE, eval = TRUE}
 #NOTE this is the code that constructs individual level level gesture networks
 #This code takes a little time (up to 10 min) to run, and its output are all the distance matrices in the distance_matrices folder
+
+seeds <- subset(ts, as.character(generation) ==  "s")
+
 #The code chuck constructs:
   #Individual level matrices: Which are 5chainsx5generationx2participants of size 24x24 (576 cells) (networktype = 1)
   #seed level matrices:        Which are 5chains x with 24x24 matrices (networktype = 0)
@@ -444,7 +448,7 @@ for(gen in c(1:5))                                              #goes through al
 
 ```
 
-```{r main method figure, results = 'hide', cache= TRUE, eval = FALSE}
+```{r main method figure, results = 'hide', cache= TRUE, eval = TRUE}
 #extract a time series to show in the method figure
 exm <- ts[ts$generation=="s" & ts$seedsetnum == "arrest1",]
 
